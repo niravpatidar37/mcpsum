@@ -9,4 +9,5 @@ pub mod canon;
 pub mod framing;
 pub mod lock;
 pub mod monitor;
+pub mod process;
 pub mod render;
