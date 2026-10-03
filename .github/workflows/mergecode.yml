@@ -26,7 +26,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   # Bump deliberately (Dependabot does not track this). Fetched by exact SHA below.
-  MERGECODE_SHA: 0741a8c01c36844988aa71ec9ab6567bb93aa692
+  MERGECODE_SHA: f69293ec74c9fef95f6c582f84c1b0b062dae3a6
 
 jobs:
   judge:
@@ -53,7 +53,7 @@ jobs:
         run: |
           set -euo pipefail
           git worktree add --detach "$RUNNER_TEMP/base" HEAD^1
-          git diff --binary HEAD^1 HEAD > "$RUNNER_TEMP/pr.diff"
+          git -c core.quotePath=false diff --binary HEAD^1 HEAD > "$RUNNER_TEMP/pr.diff"
           printf '%s\n\n%s\n' "$TASK_TITLE" "$TASK_BODY" > "$RUNNER_TEMP/task.md"
           mkdir -p "$RUNNER_TEMP/out"
 
@@ -100,10 +100,12 @@ jobs:
           if [ ! -s "$RUNNER_TEMP/out/report.md" ]; then
             echo "::error::MergeCode did not produce a report (exit '$EXIT_CODE')"; exit 1
           fi
-          case "$EXIT_CODE" in
-            0|1) echo "MergeCode verdict exit code: $EXIT_CODE" ;;
-            2) echo "::error::MergeCode verdict: REJECT"; exit 1 ;;
-            *) echo "::error::MergeCode did not produce a verdict (exit '$EXIT_CODE')"; exit 1 ;;
+          # A crash also exits non-zero: require run.json's verdict to agree with the exit code.
+          VERDICT=$(node -e 'try { process.stdout.write(String(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).verdict)) } catch { process.stdout.write("missing") }' "$RUNNER_TEMP/out/run.json")
+          case "$EXIT_CODE:$VERDICT" in
+            0:MERGE|1:REQUEST_CHANGES) echo "MergeCode verdict: $VERDICT" ;;
+            2:REJECT) echo "::error::MergeCode verdict: REJECT"; exit 1 ;;
+            *) echo "::error::MergeCode exit code '$EXIT_CODE' does not match verdict '$VERDICT'"; exit 1 ;;
           esac
 
   comment:
@@ -138,7 +140,16 @@ jobs:
             let report = fs.existsSync(file)
               ? fs.readFileSync(file, "utf8")
               : "# MergeCode\n\nThe judge did not produce a report. See the workflow logs.";
-            report = report.replaceAll(marker, "").slice(0, 60000);
+            // PR code ran in the job that wrote this file, so it may be forged even though
+            // MergeCode renders it inert. Neutralise mentions, HTML, links and images again.
+            report = report
+              .replaceAll(marker, "")
+              .replace(/@/g, "@\u200b")
+              .replace(/</g, "&lt;")
+              .replace(/\]\(/g, "]\u200b(")
+              .replace(/:\/\//g, ":\u200b//")
+              .replace(/\bwww\./gi, (m) => `${m.slice(0, 3)}\u200b.`)
+              .slice(0, 60000);
             const body = `${marker}\n${report}`;
             const { owner, repo } = context.repo;
             const issue_number = context.payload.pull_request.number;
