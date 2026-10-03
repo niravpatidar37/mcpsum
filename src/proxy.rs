@@ -21,7 +21,7 @@ use crate::audit::{verify_chain, AuditLog};
 use crate::framing::{BoundedLines, Frame};
 use crate::lock::LockFile;
 use crate::monitor::{Action, AuditEvent, Decision, Dir, Monitor, Policy};
-use crate::process::spawn_server;
+use crate::process::{relay_stderr, spawn_server};
 use crate::render::escape_untrusted;
 
 enum Event {
@@ -96,6 +96,8 @@ pub fn run_proxy(lock_path: &Path, name: &str, audit_path: Option<PathBuf>, poli
     let mut monitor = Monitor::new(server.clone(), policy);
 
     let mut child = spawn_server(&server.command, &server.env_passthrough)?;
+    // Detached on purpose (see probe): never join a pipe a grandchild may hold.
+    let _ = relay_stderr(&mut child, name);
     let child_stdout = child.stdout.take().context("server stdout")?;
     let mut child_stdin = child.stdin.take().context("server stdin")?;
 

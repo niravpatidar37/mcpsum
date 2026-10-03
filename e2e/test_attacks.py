@@ -6,11 +6,12 @@ Each test names the guarantee it proves (see docs/GUARANTEES.md).
 from __future__ import annotations
 
 import json
+import sys
 import time
 
 import pytest
 
-from harness import (INVALID_PARAMS, METHOD_NOT_FOUND, QUARANTINED, Client, lock_evil, run)
+from harness import (EVIL, INVALID_PARAMS, METHOD_NOT_FOUND, QUARANTINED, Client, lock_evil, run)
 
 SECRETS = ("id_rsa", "IMPORTANT", "aws/credentials", "attacker@evil", "mcp.json")
 
@@ -271,3 +272,16 @@ def test_I7_deaf_server_cannot_hang_proxy_shutdown(tmp_path, client_factory):
     started = time.monotonic()
     c.p.wait(timeout=20)  # raises TimeoutExpired if shutdown hangs on the blocked writer
     assert time.monotonic() - started < 20
+
+
+# ------------------------------------------------- terminal injection via server stderr
+
+def test_server_stderr_cannot_inject_terminal_escapes(tmp_path):
+    lockp = tmp_path / "mcp.lock"
+    r = run("lock", "--lock", str(lockp), "--name", "evil", "--", sys.executable, EVIL, "--mode", "stderr-escapes")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "\x1b" not in r.stderr and "\x07" not in r.stderr, repr(r.stderr)
+    assert "<U+001B>" in r.stderr
+    # the forged verdict is visibly attributed to the server, never bare
+    forged = [ln for ln in r.stderr.splitlines() if "definitions match" in ln]
+    assert forged and all(ln.startswith("[server stderr] ") for ln in forged), forged
