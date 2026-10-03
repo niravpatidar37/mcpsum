@@ -5,7 +5,9 @@ on:
     paths:
       - "src/**"
       - "fuzz/**"
+      - "Cargo.toml"
       - "Cargo.lock"
+      - "rust-toolchain.toml"
       - ".github/workflows/fuzz.yml"
   schedule:
     - cron: "17 3 * * *" # nightly long run

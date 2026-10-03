@@ -48,7 +48,14 @@ fn lock() -> ServerLock {
     ServerLock::from_surface(vec!["demo".into()], vec![], surface()).unwrap()
 }
 
-/// Independent oracle for I2: what the strict locked schemas allow.
+/// Independent oracle for I2: what the *strict* locked schemas allow.
+///
+/// I2 is stricter than plain JSON Schema on purpose: mcpsum rejects any
+/// property a locked schema does not declare, unless the schema explicitly
+/// opts in with `additionalProperties` (see `monitor::strictify`). That is what
+/// stops a model from being tricked into adding a hidden exfiltration argument
+/// such as `sidenote`. So `add` accepts exactly {a: number, b: number} and
+/// `noargs` accepts only `{}`, even though the raw schemas would permit more.
 fn oracle_call_allowed(name: &str, args: &Value) -> bool {
     let Some(obj) = args.as_object() else { return false };
     match name {
