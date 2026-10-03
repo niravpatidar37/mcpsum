@@ -191,8 +191,8 @@ def test_env_secrets_are_not_inherited_unless_passed_through(tmp_path, client_fa
     c2 = client_factory(lockp2, env=env)
     c2.initialize()
     assert c2.call(1, "echo_env", {})["result"]["content"][0]["text"] == "SUPER_SECRET=hunter2"
-    assert "SUPER_SECRET" in json.loads(lockp2.read_text())["servers"]["evil"]["envPassthrough"]
-    assert "hunter2" not in lockp2.read_text()
+    assert "SUPER_SECRET" in json.loads(lockp2.read_text(encoding="utf-8"))["servers"]["evil"]["envPassthrough"]
+    assert "hunter2" not in lockp2.read_text(encoding="utf-8")
 
 
 # ------------------------------------------------- I8: audit chain
@@ -207,10 +207,10 @@ def test_I8_audit_log_verifies_and_detects_tampering(tmp_path, client_factory):
     c.close()
     ok = run("audit-verify", str(c.audit))
     assert ok.returncode == 0, ok.stdout + ok.stderr
-    text = c.audit.read_text()
+    text = c.audit.read_text(encoding="utf-8")
     assert '"decision":"deny"' in text
     assert "TOPSECRETVALUE" not in text, "argument values must never be written to the audit log"
-    c.audit.write_text(text.replace('"decision":"deny"', '"decision":"allow"', 1))
+    c.audit.write_text(text.replace('"decision":"deny"', '"decision":"allow"', 1), encoding="utf-8")
     assert run("audit-verify", str(c.audit)).returncode != 0
 
 
@@ -242,10 +242,10 @@ def test_verify_ignores_informational_drift_unless_strict(tmp_path):
 def test_relock_replaces_an_existing_lockfile(tmp_path):
     poison = tmp_path / "poison"
     lockp = lock_evil(tmp_path, "rugpull", poison_file=poison)
-    before = lockp.read_text()
+    before = lockp.read_text(encoding="utf-8")
     poison.write_text("on")
     lock_evil(tmp_path, "rugpull", poison_file=poison)  # same path, file exists
-    after = lockp.read_text()
+    after = lockp.read_text(encoding="utf-8")
     assert before != after and "sidenote" in after
     assert not (tmp_path / "mcp.lock.tmp").exists()
 
@@ -258,7 +258,7 @@ def test_I7_deaf_server_cannot_hang_proxy_shutdown(tmp_path, client_factory):
     c.initialize()
     # Readiness is observable in the audit log; wait for it instead of sleeping.
     deadline = time.monotonic() + 20
-    while "live definitions match mcp.lock" not in (c.audit.read_text() if c.audit.exists() else ""):
+    while "live definitions match mcp.lock" not in (c.audit.read_text(encoding="utf-8") if c.audit.exists() else ""):
         assert time.monotonic() < deadline, "proxy never became ready"
         time.sleep(0.05)
     big = "x" * 200_000
