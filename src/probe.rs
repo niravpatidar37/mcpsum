@@ -16,7 +16,7 @@ use serde_json::{json, Value};
 
 use crate::framing::{BoundedLines, Frame};
 use crate::lock::{Surface, MAX_ITEMS_PER_KIND};
-use crate::process::spawn_server;
+use crate::process::{relay_stderr, spawn_server};
 
 /// Newest handshake protocol revision we speak. The 2026-07-28 "modern"
 /// (server/discover) protocol is not supported yet.
@@ -133,6 +133,9 @@ impl Session {
 
 pub fn probe(argv: &[String], env_passthrough: &[String], opts: &ProbeOptions) -> Result<Surface> {
     let mut child = spawn_server(argv, env_passthrough)?;
+    // Declared before the kill guard so it is dropped *after* it: the server is
+    // killed first, then buffered stderr gets a bounded grace period to drain.
+    let _relay = relay_stderr(&mut child, "server");
     let stdout = child.stdout.take().context("server stdout")?;
     let stdin = child.stdin.take().context("server stdin")?;
     let _guard = KillOnDrop(child);

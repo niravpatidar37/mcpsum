@@ -6,8 +6,14 @@
 //! the user's shell, is withheld.
 
 use std::ffi::OsString;
+use std::io::{BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
+
+use crate::framing::{BoundedLines, Frame};
+use crate::render::escape_untrusted;
 
 use anyhow::{bail, Context, Result};
 
@@ -99,7 +105,9 @@ pub fn resolve_program(prog: &str) -> PathBuf {
 }
 
 /// Spawn a server with piped stdio and a scrubbed environment. stderr is
-/// inherited so server diagnostics stay visible to the user.
+/// piped too: it is server-authored text, so it is relayed through
+/// [`relay_stderr`] rather than inherited (raw bytes could carry terminal
+/// escape sequences that hide or forge mcpsum's own output).
 pub fn spawn_server(argv: &[String], passthrough: &[String]) -> Result<Child> {
     let (prog, args) = argv.split_first().context("empty server command")?;
     validate_env_names(passthrough)?;
@@ -110,14 +118,165 @@ pub fn spawn_server(argv: &[String], passthrough: &[String]) -> Result<Child> {
         .envs(scrubbed_env(passthrough))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
+        .stderr(Stdio::piped())
         .spawn()
         .with_context(|| format!("failed to start MCP server `{}`", resolved.display()))
+}
+
+/// Longest server stderr line relayed; the rest is dropped (flood control).
+pub const MAX_STDERR_LINE: usize = 4096;
+
+/// Render one line of server stderr for display: lossy UTF-8, every control
+/// and invisible character escaped (no ESC/CSI/OSC reaches the terminal),
+/// length-capped, and prefixed so it cannot pass for mcpsum's own output.
+pub fn render_stderr_line(name: &str, frame: &Frame) -> String {
+    match frame {
+        Frame::Line(bytes) => {
+            let text = String::from_utf8_lossy(bytes);
+            format!("[{name} stderr] {}", escape_untrusted(text.trim_end_matches('\r')))
+        }
+        Frame::TooLong => format!("[{name} stderr] <line over {MAX_STDERR_LINE} bytes dropped>"),
+    }
+}
+
+/// How long to wait, after the server is gone, for already-buffered stderr to
+/// be relayed before giving up.
+pub const STDERR_DRAIN_GRACE: Duration = Duration::from_millis(500);
+
+/// Owns the stderr relay thread. Dropping it waits up to `grace` for the
+/// thread to drain and finish, then detaches it. The wait is bounded because
+/// a launcher's grandchild (npx, uvx) can hold the pipe open indefinitely;
+/// an unbounded join would hang mcpsum. Drop this *after* the server has been
+/// killed, so the pipe normally reaches EOF within the grace period.
+pub struct StderrRelay {
+    handle: Option<JoinHandle<()>>,
+    grace: Duration,
+}
+
+impl StderrRelay {
+    /// Wait up to `grace` for the relay to finish. Returns true if it finished.
+    pub fn finish(&mut self) -> bool {
+        let Some(h) = self.handle.take() else { return true };
+        let deadline = Instant::now() + self.grace;
+        while !h.is_finished() {
+            if Instant::now() >= deadline {
+                return false; // detached: a descendant still holds the pipe
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        let _ = h.join();
+        true
+    }
+}
+
+impl Drop for StderrRelay {
+    fn drop(&mut self) {
+        self.finish();
+    }
+}
+
+/// Relay a child's stderr to ours on a background thread, line by line,
+/// through [`render_stderr_line`].
+pub fn relay_stderr(child: &mut Child, name: &str) -> StderrRelay {
+    relay_to(child.stderr.take(), name, STDERR_DRAIN_GRACE, std::io::stderr)
+}
+
+fn relay_to<R, W, F>(src: Option<R>, name: &str, grace: Duration, sink: F) -> StderrRelay
+where
+    R: std::io::Read + Send + 'static,
+    W: Write,
+    F: Fn() -> W + Send + 'static,
+{
+    let name = escape_untrusted(name);
+    let handle = src.map(|src| {
+        thread::spawn(move || {
+            for frame in BoundedLines::new(BufReader::new(src), MAX_STDERR_LINE) {
+                let Ok(frame) = frame else { break };
+                if writeln!(sink(), "{}", render_stderr_line(&name, &frame)).is_err() {
+                    break;
+                }
+            }
+        })
+    });
+    StderrRelay { handle, grace }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relay_drains_buffered_lines_before_finishing() {
+        use std::sync::{Arc, Mutex};
+        #[derive(Clone, Default)]
+        struct Sink(Arc<Mutex<Vec<u8>>>);
+        impl Write for Sink {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let sink = Sink::default();
+        let s2 = sink.clone();
+        let src = std::io::Cursor::new(b"one\ntwo\nlast line before exit".to_vec());
+        let mut relay = relay_to(Some(src), "srv", Duration::from_secs(5), move || s2.clone());
+        assert!(relay.finish());
+        let out = String::from_utf8(sink.0.lock().unwrap().clone()).unwrap();
+        assert_eq!(
+            out,
+            "[srv stderr] one\n[srv stderr] two\n[srv stderr] last line before exit\n"
+        );
+    }
+
+    #[test]
+    fn relay_finish_is_bounded_when_pipe_never_closes() {
+        /// A reader that blocks forever, like a pipe held open by a grandchild.
+        struct Never;
+        impl std::io::Read for Never {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                loop {
+                    thread::sleep(Duration::from_secs(3600));
+                }
+            }
+        }
+        let mut relay = relay_to(Some(Never), "srv", Duration::from_millis(100), std::io::sink);
+        let t = Instant::now();
+        assert!(!relay.finish());
+        assert!(
+            t.elapsed() < Duration::from_secs(2),
+            "finish blocked: {:?}",
+            t.elapsed()
+        );
+    }
+
+    #[test]
+    fn stderr_terminal_escapes_are_neutralised() {
+        // CSI clear-screen + cursor-home, OSC 52 clipboard write, BEL, a fake
+        // "OK" line via carriage return, and a bidi override.
+        let evil = b"\x1b[2J\x1b[H\x1b]52;c;ZWNobyBwd25lZA==\x07all good\rOK  weather\xe2\x80\xae".to_vec();
+        let out = render_stderr_line("weather", &Frame::Line(evil));
+        assert!(out.starts_with("[weather stderr] "), "{out}");
+        assert!(
+            !out.chars().any(|c| c.is_control()),
+            "raw control char survived: {out:?}"
+        );
+        assert!(
+            out.contains("<U+001B>") && out.contains("<U+0007>") && out.contains("<U+202E>"),
+            "{out}"
+        );
+        assert!(out.contains("\\r"), "{out}");
+    }
+
+    #[test]
+    fn stderr_invalid_utf8_and_oversize_lines_are_safe() {
+        let out = render_stderr_line("s", &Frame::Line(vec![0xff, 0xfe, b'x']));
+        assert!(out.ends_with('x') && !out.chars().any(|c| c.is_control()), "{out:?}");
+        let out = render_stderr_line("s", &Frame::TooLong);
+        assert!(out.contains("dropped"), "{out}");
+    }
 
     #[test]
     fn secrets_are_withheld_unless_passed_through() {
