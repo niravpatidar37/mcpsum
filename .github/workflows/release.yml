@@ -1,0 +1,155 @@
+name: release
+
+# Tag push (vX.Y.Z): build, checksum, attest (Sigstore via GitHub artifact
+# attestations), and create a DRAFT release. A maintainer reviews and publishes
+# it by hand: publishing is the irreversible step, so it stays human.
+# Pull requests that touch this file run the build matrix only (dry run).
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+  pull_request:
+    paths: [".github/workflows/release.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-24.04, musl: true, run: true }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-24.04-arm, musl: true, run: true }
+          - { target: x86_64-pc-windows-msvc, os: windows-2025, run: true }
+          - { target: aarch64-apple-darwin, os: macos-15, run: true }
+          - { target: x86_64-apple-darwin, os: macos-15, run: false } # cross-compiled
+    env:
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pinned toolchain and target
+        shell: bash
+        run: |
+          rustup toolchain install
+          rustup target add "$TARGET"
+      - name: Install musl tools
+        if: matrix.musl
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools
+      - name: Build
+        shell: bash
+        run: cargo build --release --locked --target "$TARGET"
+      - name: Smoke test
+        if: matrix.run
+        shell: bash
+        run: |
+          bin="target/$TARGET/release/mcpsum"
+          [ -f "$bin.exe" ] && bin="$bin.exe"
+          "$bin" --version
+          "$bin" lock --help > /dev/null
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          name="mcpsum-$TARGET"
+          mkdir -p "dist/$name"
+          cp "target/$TARGET/release/mcpsum" LICENSE README.md "dist/$name/"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          rm -rf "dist/$name"
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $name = "mcpsum-$env:TARGET"
+          New-Item -ItemType Directory -Force "dist/$name" | Out-Null
+          Copy-Item "target/$env:TARGET/release/mcpsum.exe", LICENSE, README.md "dist/$name/"
+          Compress-Archive -Path "dist/$name" -DestinationPath "dist/$name.zip"
+          Remove-Item -Recurse "dist/$name"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  sbom:
+    name: sbom (CycloneDX)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pinned toolchain
+        run: rustup toolchain install
+      - name: Install cargo-cyclonedx
+        run: cargo install cargo-cyclonedx --version 0.5.9 --locked
+      - name: Generate SBOM
+        run: |
+          # --target all: one SBOM covering the dependencies of every released platform
+          cargo cyclonedx --format json --spec-version 1.5 --describe crate --target all
+          mkdir -p dist && mv mcpsum.cdx.json dist/mcpsum.cdx.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dist-sbom
+          path: dist/mcpsum.cdx.json
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: attest and draft release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [build, sbom]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: release
+    permissions:
+      contents: write # create the draft release
+      id-token: write # Sigstore signing certificate (OIDC)
+      attestations: write # store the attestations
+    env:
+      TAG: ${{ github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Tag must match Cargo.toml version
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          [ "v$version" = "$TAG" ] || { echo "tag $TAG != Cargo.toml v$version"; exit 1; }
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        working-directory: dist
+        run: |
+          sha256sum -- * > SHA256SUMS
+          cat SHA256SUMS
+      - name: Attest build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-checksums: dist/SHA256SUMS
+      - name: Attest SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-checksums: dist/SHA256SUMS
+          sbom-path: dist/mcpsum.cdx.json
+      - name: Create draft release
+        run: |
+          gh release create "$TAG" dist/* --draft --verify-tag --title "mcpsum $TAG" \
+            --notes "Verify before use: https://github.com/$GH_REPO/blob/main/docs/RELEASING.md#verify-a-release"

@@ -81,7 +81,8 @@ carrying `sidenote` would have been refused.
 
 ## Quick start
 
-Requires Rust 1.88+ (release binaries are coming with v0.1).
+Requires Rust 1.88+. Release binaries for Linux, macOS and Windows will be attached to
+GitHub releases from v0.1, with signed build provenance: [how to verify one](docs/RELEASING.md#verify-a-release).
 
 ```sh
 cargo install --git https://github.com/niravpatidar37/mcpsum --locked mcpsum
@@ -213,7 +214,7 @@ mcpsum's design draws on:
 - Boucher & Anderson, *Trojan Source*, [CVE-2021-42574](https://nvd.nist.gov/vuln/detail/CVE-2021-42574): invisible and bidi characters.
 - Go's [checksum database](https://go.dev/ref/mod#checksum-database): the model for `mcp.lock` and the planned transparency log.
 
-More detail: [threat model](docs/THREAT-MODEL.md) · [lockfile format](docs/LOCKFILE.md).
+More detail: [threat model](docs/THREAT-MODEL.md) · [lockfile format](docs/LOCKFILE.md) · [releases and verification](docs/RELEASING.md).
 
 ## Contributing and security
 

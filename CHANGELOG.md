@@ -18,7 +18,9 @@ All notable changes are recorded here. The format follows
 - Adversarial e2e suite against a malicious MCP server; interop tests with the
   official MCP Python SDK and official reference servers; property tests;
   four cargo-fuzz targets.
-- Docs: guarantees, threat model, lockfile format.
+- Docs: guarantees, threat model, lockfile format, release verification.
+- Release pipeline: 5 platforms, SHA256SUMS, CycloneDX SBOM, build-provenance and SBOM
+  attestations (Sigstore), draft-release gate.
 
 ### Security
 - Withhold server-authored `initialize` error text (I1 gap found by the property test, #4).
