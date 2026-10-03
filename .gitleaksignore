@@ -1,0 +1,4 @@
+# Reviewed false positives (gitleaks fingerprint: commit:file:rule:line).
+# e2e/test_interop.py once used a fixed fake canary string; it is now generated
+# at runtime. The value was never a real credential.
+edbbf409ea255b42b2366222731a920f0f02667e:e2e/test_interop.py:generic-api-key:77
