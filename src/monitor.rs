@@ -1803,7 +1803,7 @@ mod tests {
         ] {
             let a = call(&mut m, 1, "add", args);
             assert!(to_server(&a).is_empty());
-            let blob = format!("{:?}", a);
+            let blob = format!("{a:?}");
             assert!(!blob.contains("TOPSECRETVALUE"), "{blob}");
         }
     }

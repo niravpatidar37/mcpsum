@@ -2,7 +2,7 @@
 name = "mcpsum"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.80"
+rust-version = "1.88"
 license = "Apache-2.0"
 description = "A reference monitor for MCP: serves tool definitions from a reviewed lockfile, enforces locked schemas, denies server-initiated sampling/elicitation, and fails closed."
 readme = "README.md"

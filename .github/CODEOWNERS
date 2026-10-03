@@ -1,0 +1,7 @@
+# The lockfile format, the enforcement core and CI are security-critical:
+# every change to them needs the maintainer's review.
+*                       @niravpatidar37
+/src/monitor.rs         @niravpatidar37
+/src/lock.rs            @niravpatidar37
+/.github/               @niravpatidar37
+/deny.toml              @niravpatidar37

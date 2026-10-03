@@ -1,0 +1,6 @@
+[toolchain]
+# Pinned for reproducible builds and lints; Dependabot does not bump this,
+# so update deliberately.
+channel = "1.88.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"
