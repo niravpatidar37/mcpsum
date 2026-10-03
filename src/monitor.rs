@@ -1467,6 +1467,38 @@ mod tests {
     }
 
     #[test]
+    fn i7_redos_patterns_in_locked_schemas_run_in_linear_time() {
+        // Catastrophic for a backtracking engine: (a+)+$ against "aaaa…!" is
+        // O(2^n). Locked schemas are server-authored, so every regex path in
+        // the validator must use the linear-time engine.
+        // Lookaround and backreferences force a backtracking engine if one is
+        // in use; the plain form is caught even by engines that pick a DFA for
+        // "easy" patterns. A pattern the linear engine cannot compile makes the
+        // validator fail to build, which denies every call (fail closed): fine.
+        let input = format!("{}!", "a".repeat(40));
+        let mut schemas = Vec::new();
+        for evil in ["^(a+)+$", "^(?=(a+)+$)", r"^(a+)+\1$"] {
+            schemas.push(json!({"type": "object", "properties": {"s": {"type": "string", "pattern": evil}}}));
+            schemas.push(json!({"type": "object", "patternProperties": {evil: {"type": "string"}}, "additionalProperties": false}));
+            schemas.push(
+                json!({"$schema": "http://json-schema.org/draft-07/schema#", "type": "object",
+                   "properties": {"s": {"type": "string", "pattern": evil, "format": "regex"}}}),
+            );
+        }
+        for schema in schemas {
+            let Ok(v) = compile_validator(&schema) else { continue };
+            let started = std::time::Instant::now();
+            let _ = v.is_valid(&json!({"s": input.clone()}));
+            let _ = v.is_valid(&json!({ input.clone(): "x" }));
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(1),
+                "slow on {schema}: {:?}",
+                started.elapsed()
+            );
+        }
+    }
+
+    #[test]
     fn i1_served_capabilities_never_advertise_list_changed_logging_or_completions() {
         let mut m = mon();
         let c = to_client(&init(&mut m, &surface()));
