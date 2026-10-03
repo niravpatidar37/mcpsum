@@ -25,3 +25,15 @@ updates:
         patterns: ["*"]
     commit-message:
       prefix: "ci(deps)"
+
+  - package-ecosystem: uv
+    directory: /e2e
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      e2e:
+        patterns: ["*"]
+    commit-message:
+      prefix: "test(deps)"
