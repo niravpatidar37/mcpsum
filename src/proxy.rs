@@ -10,7 +10,7 @@
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, SyncSender};
+use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -20,7 +20,7 @@ use serde_json::Value;
 use crate::audit::{verify_chain, AuditLog};
 use crate::framing::{BoundedLines, Frame};
 use crate::lock::LockFile;
-use crate::monitor::{Action, Decision, Monitor, Policy};
+use crate::monitor::{Action, AuditEvent, Decision, Dir, Monitor, Policy};
 use crate::process::spawn_server;
 use crate::render::escape_untrusted;
 
@@ -123,7 +123,7 @@ pub fn run_proxy(lock_path: &Path, name: &str, audit_path: Option<PathBuf>, poli
     let start = Instant::now();
     let stdout = std::io::stdout();
     let mut exit_code = 0;
-    for ev in rx {
+    'events: for ev in rx {
         let actions = match ev {
             Event::Client(Frame::Line(l)) => monitor.on_client_line(&l),
             Event::Client(Frame::TooLong) => monitor.client_oversize(),
@@ -137,47 +137,87 @@ pub fn run_proxy(lock_path: &Path, name: &str, audit_path: Option<PathBuf>, poli
                 break;
             }
         };
+        // Write-ahead audit (I8): every decision in this batch is appended to
+        // the log before any of its effects happen. If the log cannot be
+        // written, nothing in the batch is forwarded and the proxy stops.
+        write_ahead(&mut audit, &actions, name)?;
         for a in actions {
             match a {
                 Action::ToServer(v) => {
                     let mut line = serde_json::to_vec(&v)?;
                     line.push(b'\n');
-                    if to_server.send(line).is_err() {
-                        exit_code = 1;
+                    match to_server.try_send(line) {
+                        Ok(()) => {}
+                        Err(TrySendError::Full(_)) => {
+                            // The server has stopped reading its input. Fail closed
+                            // rather than block the client side indefinitely.
+                            let e = AuditEvent {
+                                dir: Dir::Internal,
+                                method: None,
+                                subject: None,
+                                decision: Decision::Quarantine,
+                                reason: "server is not reading its input; proxy exiting".into(),
+                                args_digest: None,
+                            };
+                            write_ahead(&mut audit, &[Action::Audit(e)], name)?;
+                            exit_code = 1;
+                            break 'events;
+                        }
+                        Err(TrySendError::Disconnected(_)) => {
+                            exit_code = 1;
+                            break 'events;
+                        }
                     }
                 }
                 Action::ToClient(v) => {
                     if write_line(&mut stdout.lock(), &v).is_err() {
-                        return Ok(0); // client went away
+                        break 'events; // client went away
                     }
                 }
-                Action::Audit(e) => {
-                    if matches!(e.decision, Decision::Deny | Decision::Quarantine) {
-                        eprintln!(
-                            "mcpsum[{name}]: {:?} {} {}: {}",
-                            e.decision,
-                            escape_untrusted(e.method.as_deref().unwrap_or("-")),
-                            escape_untrusted(e.subject.as_deref().unwrap_or("")),
-                            escape_untrusted(&e.reason)
-                        );
-                    }
-                    audit.append(&e, unix_ms())?;
-                }
+                Action::Audit(_) => {} // already written ahead
             }
         }
     }
+    // Shutdown. Close the server's input, give it a moment to exit, then kill
+    // it. Only then join the writer: if the server stopped reading, the writer
+    // is blocked in write_all and only a broken pipe (the kill) releases it.
     drop(to_server);
-    let _ = writer.join();
     let deadline = Instant::now() + Duration::from_secs(2);
+    let mut exited = false;
     while Instant::now() < deadline {
         if let Ok(Some(_)) = child.try_wait() {
-            return Ok(exit_code);
+            exited = true;
+            break;
         }
         thread::sleep(Duration::from_millis(50));
     }
-    let _ = child.kill();
-    let _ = child.wait();
+    if !exited {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    let _ = writer.join();
     Ok(exit_code)
+}
+
+/// Append every audit event in `actions` before any effect is executed.
+fn write_ahead<W: Write>(audit: &mut AuditLog<W>, actions: &[Action], name: &str) -> Result<()> {
+    for a in actions {
+        if let Action::Audit(e) = a {
+            if matches!(e.decision, Decision::Deny | Decision::Quarantine) {
+                eprintln!(
+                    "mcpsum[{name}]: {:?} {} {}: {}",
+                    e.decision,
+                    escape_untrusted(e.method.as_deref().unwrap_or("-")),
+                    escape_untrusted(e.subject.as_deref().unwrap_or("")),
+                    escape_untrusted(&e.reason)
+                );
+            }
+            audit
+                .append(e, unix_ms())
+                .context("audit log write failed; refusing to forward (fail closed)")?;
+        }
+    }
+    Ok(())
 }
 
 fn spawn_reader<R: std::io::Read + Send + 'static>(
@@ -205,7 +245,40 @@ fn spawn_reader<R: std::io::Read + Send + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::monitor::{AuditEvent, Dir};
+
+    /// A writer that fails, like a full disk.
+    struct FailingWriter;
+    impl Write for FailingWriter {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("disk full"))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::Error::other("disk full"))
+        }
+    }
+
+    #[test]
+    fn write_ahead_fails_closed_when_audit_cannot_be_written() {
+        let mut audit = AuditLog::new(FailingWriter, "s");
+        let batch = vec![Action::ToClient(serde_json::json!({"x": 1})), Action::Audit(ev())];
+        // The caller executes effects only after write_ahead returns Ok.
+        assert!(write_ahead(&mut audit, &batch, "s").is_err());
+    }
+
+    #[test]
+    fn write_ahead_logs_every_event_in_the_batch() {
+        let mut buf = Vec::new();
+        {
+            let mut audit = AuditLog::new(&mut buf, "s");
+            let batch = vec![
+                Action::Audit(ev()),
+                Action::ToServer(serde_json::json!({})),
+                Action::Audit(ev()),
+            ];
+            write_ahead(&mut audit, &batch, "s").unwrap();
+        }
+        assert_eq!(verify_chain(&String::from_utf8(buf).unwrap()).unwrap().0, 2);
+    }
 
     fn ev() -> AuditEvent {
         AuditEvent {
