@@ -1,4 +1,14 @@
-# mcpsum
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/brand/logo-dark.svg">
+    <img alt="mcpsum" src="assets/brand/logo.svg" width="320">
+  </picture>
+</p>
+
+<p align="center">
+  <b>Stop MCP servers from rug-pulling your AI agent.</b><br>
+  A lockfile + runtime reference monitor for MCP tools.
+</p>
 
 > **Status: pre-release, under active development. Do not rely on it yet.**
 
@@ -16,4 +26,4 @@ Full documentation, guarantees and limitations will land with the first release.
 
 ## License
 
-Apache-2.0. See [LICENSE](LICENSE).
+Apache-2.0. See [LICENSE](LICENSE). Brand assets and usage: [assets/brand](assets/brand/README.md).
