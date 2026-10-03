@@ -4,6 +4,7 @@
 //! every security invariant can be tested deterministically and property-tested.
 //! The I/O shell (`proxy`, `probe`) is kept thin.
 
+pub mod audit;
 pub mod canon;
 pub mod lock;
 pub mod monitor;
