@@ -1,0 +1,49 @@
+[package]
+name = "mcpsum-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4.13"
+mcpsum = { path = ".." }
+serde_json = "1.0.151"
+
+# Separate workspace: fuzzing needs nightly + sanitizers and must not affect
+# the main crate's stable build, lockfile or cargo-deny graph.
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "monitor_session"
+path = "fuzz_targets/monitor_session.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "lock_parse"
+path = "fuzz_targets/lock_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "framing"
+path = "fuzz_targets/framing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "escape_untrusted"
+path = "fuzz_targets/escape_untrusted.rs"
+test = false
+doc = false
+bench = false
