@@ -1,0 +1,37 @@
+# cargo-deny policy: https://embarkstudios.github.io/cargo-deny/
+# Supply-chain gate run in CI on every PR.
+
+[graph]
+all-features = true
+
+[advisories]
+# Any RustSec advisory (vulnerability, unmaintained, unsound) fails the build.
+# Add an `ignore` entry only with a justification comment and an expiry plan.
+yanked = "deny"
+ignore = []
+
+[licenses]
+# Permissive licenses only; mcpsum is Apache-2.0.
+allow = [
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+# Only crates.io; no git dependencies or alternate registries.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
