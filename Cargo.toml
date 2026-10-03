@@ -1,0 +1,31 @@
+[package]
+name = "mcpsum"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "Apache-2.0"
+description = "A reference monitor for MCP: serves tool definitions from a reviewed lockfile, enforces locked schemas, denies server-initiated sampling/elicitation, and fails closed."
+readme = "README.md"
+keywords = ["mcp", "security", "llm", "agents", "lockfile"]
+categories = ["command-line-utilities", "development-tools"]
+
+[dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6.7", features = ["derive"] }
+hex = "0.4.3"
+# default-features = false: no remote/file $ref resolution. An attacker-controlled
+# schema must never make us fetch URLs or read local files (SSRF / LFI).
+jsonschema = { version = "0.58.5", default-features = false }
+regex = "1.13.1"
+serde = { version = "1", features = ["derive"] }
+serde_jcs = "0.2.0"
+serde_json = "1.0.151"
+sha2 = "0.11.0"
+
+[dev-dependencies]
+proptest = "1.11.0"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
