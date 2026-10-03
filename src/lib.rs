@@ -11,3 +11,4 @@ pub mod lock;
 pub mod monitor;
 pub mod process;
 pub mod render;
+pub mod report;
