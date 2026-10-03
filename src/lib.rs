@@ -7,3 +7,4 @@
 pub mod canon;
 pub mod lock;
 pub mod monitor;
+pub mod render;
