@@ -6,6 +6,10 @@ All notable changes are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-10-03
+
+First release. stdio transport only; see the limits in the README.
+
 ### Added
 - Reference monitor (`src/monitor.rs`) enforcing I1 (definitions served from the
   lock), I2 (strict locked schemas), I3 (deny by default, both directions),

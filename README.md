@@ -16,8 +16,9 @@
   <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue"></a>
 </p>
 
-> **Status: pre-release (v0.1 in progress).** The guarantees below are implemented and
-> tested, but the tool has not had an external security review yet. Read [the limits](#what-it-does-not-do).
+> **Status: v0.1, early release.** The guarantees below are implemented and tested, but the
+> tool has not had an external security review yet. Read [the limits](#what-it-does-not-do)
+> before relying on it.
 
 ## The problem
 
@@ -81,11 +82,18 @@ carrying `sidenote` would have been refused.
 
 ## Quick start
 
-Requires Rust 1.88+. Release binaries for Linux, macOS and Windows will be attached to
-GitHub releases from v0.1, with signed build provenance: [how to verify one](docs/RELEASING.md#verify-a-release).
+**Download a binary** for Linux, macOS or Windows from the
+[latest release](https://github.com/niravpatidar37/mcpsum/releases/latest), then verify it
+(one command, [details](docs/RELEASING.md#verify-a-release)):
 
 ```sh
-cargo install --git https://github.com/niravpatidar37/mcpsum --locked mcpsum
+gh attestation verify mcpsum-x86_64-unknown-linux-musl.tar.gz --repo niravpatidar37/mcpsum
+```
+
+Or **build from source** (Rust 1.88+):
+
+```sh
+cargo install --git https://github.com/niravpatidar37/mcpsum --tag v0.1.0 --locked mcpsum
 ```
 
 **1. Lock a server.** Pin the package version, so the code you reviewed is the code that runs:
