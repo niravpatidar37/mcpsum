@@ -14,3 +14,6 @@ package = false
 [tool.pytest.ini_options]
 testpaths = ["."]
 addopts = "-ra"
+markers = [
+    "interop: talks to official MCP reference servers fetched from npm/PyPI (network required)",
+]
