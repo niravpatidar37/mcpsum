@@ -36,7 +36,9 @@ Do not run a binary that fails step 1. Please report it: see [SECURITY.md](../SE
 | `mcpsum-x86_64-apple-darwin.tar.gz` | macOS Intel (cross-compiled; not smoke-tested in CI) |
 
 macOS binaries are not notarized yet, so Gatekeeper may block them. After
-verifying, clear the quarantine flag with `xattr -d com.apple.quarantine mcpsum`.
+verifying and extracting, clear the quarantine flag:
+`xattr -d com.apple.quarantine mcpsum-aarch64-apple-darwin/mcpsum` (use the directory
+name of your archive).
 
 ### What this proves, and what it doesn't
 
