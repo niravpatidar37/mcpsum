@@ -133,9 +133,9 @@ impl Session {
 
 pub fn probe(argv: &[String], env_passthrough: &[String], opts: &ProbeOptions) -> Result<Surface> {
     let mut child = spawn_server(argv, env_passthrough)?;
-    // Detached on purpose: launchers (npx, uvx) may leave grandchildren holding
-    // the pipe, and joining would hang. The thread ends at EOF.
-    let _ = relay_stderr(&mut child, "server");
+    // Declared before the kill guard so it is dropped *after* it: the server is
+    // killed first, then buffered stderr gets a bounded grace period to drain.
+    let _relay = relay_stderr(&mut child, "server");
     let stdout = child.stdout.take().context("server stdout")?;
     let stdin = child.stdin.take().context("server stdin")?;
     let _guard = KillOnDrop(child);

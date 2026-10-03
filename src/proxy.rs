@@ -96,8 +96,8 @@ pub fn run_proxy(lock_path: &Path, name: &str, audit_path: Option<PathBuf>, poli
     let mut monitor = Monitor::new(server.clone(), policy);
 
     let mut child = spawn_server(&server.command, &server.env_passthrough)?;
-    // Detached on purpose (see probe): never join a pipe a grandchild may hold.
-    let _ = relay_stderr(&mut child, name);
+    // Dropped at return, after the server is killed below: bounded drain.
+    let _relay = relay_stderr(&mut child, name);
     let child_stdout = child.stdout.take().context("server stdout")?;
     let mut child_stdin = child.stdin.take().context("server stdin")?;
 
@@ -125,6 +125,9 @@ pub fn run_proxy(lock_path: &Path, name: &str, audit_path: Option<PathBuf>, poli
     let start = Instant::now();
     let stdout = std::io::stdout();
     let mut exit_code = 0;
+    // A fatal error still goes through the shutdown below, so the server is
+    // never left running (an early `?` would skip the kill).
+    let mut fatal: Option<anyhow::Error> = None;
     'events: for ev in rx {
         let actions = match ev {
             Event::Client(Frame::Line(l)) => monitor.on_client_line(&l),
@@ -142,11 +145,20 @@ pub fn run_proxy(lock_path: &Path, name: &str, audit_path: Option<PathBuf>, poli
         // Write-ahead audit (I8): every decision in this batch is appended to
         // the log before any of its effects happen. If the log cannot be
         // written, nothing in the batch is forwarded and the proxy stops.
-        write_ahead(&mut audit, &actions, name)?;
+        if let Err(e) = write_ahead(&mut audit, &actions, name) {
+            fatal = Some(e);
+            break 'events;
+        }
         for a in actions {
             match a {
                 Action::ToServer(v) => {
-                    let mut line = serde_json::to_vec(&v)?;
+                    let mut line = match serde_json::to_vec(&v) {
+                        Ok(l) => l,
+                        Err(e) => {
+                            fatal = Some(e.into());
+                            break 'events;
+                        }
+                    };
                     line.push(b'\n');
                     match to_server.try_send(line) {
                         Ok(()) => {}
@@ -161,7 +173,9 @@ pub fn run_proxy(lock_path: &Path, name: &str, audit_path: Option<PathBuf>, poli
                                 reason: "server is not reading its input; proxy exiting".into(),
                                 args_digest: None,
                             };
-                            write_ahead(&mut audit, &[Action::Audit(e)], name)?;
+                            if let Err(e) = write_ahead(&mut audit, &[Action::Audit(e)], name) {
+                                fatal = Some(e);
+                            }
                             exit_code = 1;
                             break 'events;
                         }
@@ -198,7 +212,10 @@ pub fn run_proxy(lock_path: &Path, name: &str, audit_path: Option<PathBuf>, poli
         let _ = child.wait();
     }
     let _ = writer.join();
-    Ok(exit_code)
+    match fatal {
+        Some(e) => Err(e),
+        None => Ok(exit_code),
+    }
 }
 
 /// Append every audit event in `actions` before any effect is executed.
