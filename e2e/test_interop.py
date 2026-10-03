@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import secrets
 import shutil
 
 import pytest
@@ -32,7 +33,7 @@ EVERYTHING = ["npx", "-y", "@modelcontextprotocol/server-everything@2026.8.31"]
 
 def lock(tmp, name, cmd, env=None):
     lockp = tmp / "mcp.lock"
-    r = run("lock", "--lock", str(lockp), "--name", name, "--", *cmd, timeout=300, env=env)
+    r = run("lock", "--lock", str(lockp), "--name", name, "--timeout-secs", "240", "--", *cmd, timeout=300, env=env)
     assert r.returncode == 0, r.stdout + r.stderr
     return lockp
 
@@ -74,8 +75,10 @@ def test_official_sdk_through_proxy_to_official_time_server(tmp_path):
 
 @pytest.mark.skipif(not shutil.which("npx"), reason="npx not available")
 def test_official_everything_server_cannot_read_unlisted_secrets(tmp_path):
-    secret = "mcpsum-interop-s3cr3t-7d1f"
-    env = {**os.environ, "MCPSUM_INTEROP_SECRET": secret}
+    # Generated per run: no secret-looking literal in the repo, and nothing to
+    # match by accident. The test only checks that this value never leaks.
+    canary = f"mcpsum-canary-{secrets.token_hex(8)}"
+    env = {**os.environ, "MCPSUM_INTEROP_SECRET": canary}
     lockp = lock(tmp_path, "everything", EVERYTHING, env=env)
 
     async def go(s: ClientSession):
@@ -86,6 +89,6 @@ def test_official_everything_server_cannot_read_unlisted_secrets(tmp_path):
         dump = await s.call_tool("get-env", {})
         text = " ".join(getattr(c, "text", "") for c in dump.content)
         assert "PATH" in text.upper(), "get-env should work and show the allow-listed variables"
-        assert secret not in text and "MCPSUM_INTEROP_SECRET" not in text
+        assert canary not in text and "MCPSUM_INTEROP_SECRET" not in text
 
     asyncio.run(with_session(lockp, "everything", go, env=env))
