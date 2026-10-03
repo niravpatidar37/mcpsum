@@ -237,7 +237,11 @@ def main() -> None:
         ("social-preview.svg", "social-preview.png", 1280),
     ]
     for src, dst, width in renders:
-        subprocess.run([resvg, "-w", str(width), str(OUT / src), str(OUT / dst)], check=True)
+        # List-form argv, no shell: nothing here is shell-interpreted. All
+        # arguments are constants from `renders` plus the absolute resvg path
+        # from shutil.which, so no untrusted input reaches this call.
+        argv = [resvg, "-w", str(width), str(OUT / src), str(OUT / dst)]
+        subprocess.run(argv, check=True, shell=False)  # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit
         print(f"rendered {dst} ({(OUT / dst).stat().st_size} bytes)")
 
 
