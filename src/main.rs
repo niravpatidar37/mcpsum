@@ -52,7 +52,10 @@ enum Cmd {
         #[arg(last = true, required = true, value_name = "COMMAND")]
         command: Vec<String>,
     },
-    /// Re-probe locked servers and report drift (exit 1 on any change).
+    /// Re-probe locked servers and report drift. Exit 1 on definitional drift
+    /// (tools, prompts, resources, instructions); informational changes
+    /// (serverInfo, capabilities, protocol version) are reported but exit 0
+    /// unless --strict, matching what the runtime proxy quarantines.
     Verify {
         #[arg(long, default_value = "mcp.lock")]
         lock: PathBuf,
@@ -61,6 +64,9 @@ enum Cmd {
         name: Option<String>,
         #[arg(long, default_value_t = 30)]
         timeout_secs: u64,
+        /// Also exit 1 on informational changes.
+        #[arg(long)]
+        strict: bool,
     },
     /// Run a locked server behind the reference monitor (use this as the command in your MCP client config).
     Proxy {
@@ -98,7 +104,8 @@ fn main() -> ExitCode {
             lock,
             name,
             timeout_secs,
-        } => cmd_verify(&lock, name.as_deref(), timeout_secs),
+            strict,
+        } => cmd_verify(&lock, name.as_deref(), timeout_secs, strict),
         Cmd::Proxy { lock, name, audit } => {
             run_proxy(&lock, &name, audit, Policy::default()).map(|c| if c == 0 { EXIT_OK } else { EXIT_DRIFT })
         }
@@ -196,7 +203,7 @@ fn cmd_lock(
     Ok(EXIT_OK)
 }
 
-fn cmd_verify(lock: &Path, name: Option<&str>, timeout_secs: u64) -> Result<u8> {
+fn cmd_verify(lock: &Path, name: Option<&str>, timeout_secs: u64, strict: bool) -> Result<u8> {
     let lf = LockFile::load(lock)?;
     let opts = ProbeOptions {
         timeout: Duration::from_secs(timeout_secs),
@@ -219,8 +226,11 @@ fn cmd_verify(lock: &Path, name: Option<&str>, timeout_secs: u64) -> Result<u8> 
         if changes.is_empty() {
             println!("ok     {}", escape_untrusted(n));
         } else {
-            drift = true;
             let definitional = changes.iter().any(Change::is_definitional);
+            // Definitional drift always fails; informational changes only with --strict.
+            if definitional || strict {
+                drift = true;
+            }
             println!(
                 "{} {}",
                 if definitional { "DRIFT " } else { "info  " },
