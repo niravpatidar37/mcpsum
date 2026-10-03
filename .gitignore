@@ -7,3 +7,9 @@ __pycache__/
 
 # brand build cache (font archive is fetched + checksum-verified)
 assets/brand/tools/.cache/
+
+# fuzzing output
+fuzz/target/
+fuzz/corpus/
+fuzz/artifacts/
+fuzz/coverage/
