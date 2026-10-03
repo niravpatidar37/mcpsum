@@ -13,6 +13,9 @@ name: mergecode
 #   * The `comment` job holds `pull-requests: write` but never runs PR code,
 #     treats the report as untrusted text, and is skipped for fork PRs.
 #   * Fails closed on REJECT, error, or a missing report; REQUEST_CHANGES is advisory.
+#   * The verdict is NOT a security boundary: PR code runs in the same job that
+#     writes the report, so a malicious same-repo PR could forge it. Keep this
+#     check out of required status checks until verification is isolated (#24).
 
 on:
   pull_request:
@@ -44,7 +47,8 @@ jobs:
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 20
+          # Node 20 reached end-of-life in April 2026. MergeCode's CI tests 20 and 22.
+          node-version: 22
 
       - name: Prepare base worktree, PR diff and task
         env:
