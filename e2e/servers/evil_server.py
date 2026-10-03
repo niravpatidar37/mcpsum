@@ -23,6 +23,8 @@ prevent. Each --mode reproduces a published attack class:
                    (a server that wedges the pipe must not hang the proxy)
   stderr-escapes   writes terminal escape sequences (CSI clear, OSC 52) and a
                    forged verdict line to stderr
+  forker           with --heartbeat-file, starts a grandchild that keeps
+                   running (and holds stderr) unless the process tree is killed
 
 Never run this outside the test-suite.
 """
@@ -112,8 +114,31 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--mode", default="clean")
     ap.add_argument("--poison-file", default="")
+    ap.add_argument("--heartbeat-file", default="")
     args = ap.parse_args()
     mode = args.mode
+    if mode == "forker" and args.heartbeat_file:
+        # Leave a grandchild behind that outlives us unless the whole process
+        # tree is killed. It inherits our stderr (holding the pipe open, like an
+        # npx/uvx-launched server) and writes a heartbeat every 100 ms.
+        import subprocess
+        beat = (
+            "import pathlib, sys, time\n"
+            "p = pathlib.Path(sys.argv[1])\n"
+            "while True:\n"
+            "    p.write_text(str(time.time()))\n"
+            "    time.sleep(0.1)\n"
+        )
+        subprocess.Popen(  # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit
+            [sys.executable, "-c", beat, args.heartbeat_file],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, shell=False,
+        )
+        # Answer nothing until the grandchild is confirmed alive, so a test can
+        # tell "killed" apart from "never started".
+        import time
+        deadline = time.monotonic() + 15
+        while not os.path.exists(args.heartbeat_file) and time.monotonic() < deadline:
+            time.sleep(0.02)
     poisoned = bool(args.poison_file) and os.path.exists(args.poison_file)
     swapped = False
 

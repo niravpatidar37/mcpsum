@@ -285,3 +285,45 @@ def test_server_stderr_cannot_inject_terminal_escapes(tmp_path):
     # the forged verdict is visibly attributed to the server, never bare
     forged = [ln for ln in r.stderr.splitlines() if "definitions match" in ln]
     assert forged and all(ln.startswith("[server stderr] ") for ln in forged), forged
+
+
+# ------------------------------------------------- process lifetime (#7)
+
+def _assert_heartbeat_stops(hb):
+    """The grandchild writes a timestamp every 100 ms while it is alive."""
+    deadline = time.monotonic() + 10
+    while not hb.exists():
+        assert time.monotonic() < deadline, "grandchild never started"
+        time.sleep(0.05)
+    time.sleep(0.5)  # let a final write land
+    before = hb.read_text(encoding="utf-8")
+    time.sleep(1.0)
+    after = hb.read_text(encoding="utf-8")
+    assert before == after, "a server grandchild is still running after mcpsum finished"
+
+
+def test_lock_kills_server_grandchildren(tmp_path):
+    hb = tmp_path / "heartbeat"
+    lockp = tmp_path / "mcp.lock"
+    started = time.monotonic()
+    r = run("lock", "--lock", str(lockp), "--name", "evil", "--",
+            sys.executable, EVIL, "--mode", "forker", "--heartbeat-file", str(hb))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert time.monotonic() - started < 15, "lock waited on a pipe held by the grandchild"
+    _assert_heartbeat_stops(hb)
+
+
+def test_proxy_kills_server_grandchildren_on_shutdown(tmp_path, client_factory):
+    hb = tmp_path / "heartbeat"
+    lockp = tmp_path / "mcp.lock"
+    r = run("lock", "--lock", str(lockp), "--name", "evil", "--",
+            sys.executable, EVIL, "--mode", "forker", "--heartbeat-file", str(hb))
+    assert r.returncode == 0, r.stdout + r.stderr
+    _assert_heartbeat_stops(hb)  # the lock-time grandchild is gone
+    hb.unlink()
+    c = client_factory(lockp)
+    c.initialize()
+    assert c.call(1, "add", {"a": 1, "b": 2})["result"]["content"][0]["text"] == "3"
+    c.p.stdin.close()
+    c.p.wait(timeout=20)
+    _assert_heartbeat_stops(hb)

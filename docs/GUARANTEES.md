@@ -175,6 +175,12 @@ e2e: `test_I8_audit_log_verifies_and_detects_tampering`.
   `test_official_everything_server_cannot_read_unlisted_secrets` (against the
   official `server-everything`, whose `get-env` tool dumps every variable
   it can see).
+- **Process lifetime.** Each server runs as the leader of its own process group (Unix)
+  or inside a Job Object (Windows; assigned before the server can start anything), and
+  mcpsum kills that whole tree on exit, so grandchildren cannot keep running
+  unmediated. Limits: on Unix a process can leave its group with `setsid()`, and the
+  tree is not killed if mcpsum itself is killed abruptly. Tests:
+  `test_lock_kills_server_grandchildren`, `test_proxy_kills_server_grandchildren_on_shutdown`.
 - **Safe rendering.** Every server-authored string shown by `lock`, `verify`,
   `show`, or relayed from server stderr is escaped. Control characters,
   bidi overrides (Trojan Source, CVE-2021-42574), zero-width and Unicode

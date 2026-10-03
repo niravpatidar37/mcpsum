@@ -6,7 +6,7 @@
 //! filesystem permissions, exactly as it would under an MCP client.
 
 use std::io::{BufReader, Write};
-use std::process::{Child, ChildStdin};
+use std::process::ChildStdin;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -34,15 +34,6 @@ impl Default for ProbeOptions {
             timeout: Duration::from_secs(30),
             max_line_bytes: 4 * 1024 * 1024,
         }
-    }
-}
-
-struct KillOnDrop(Child);
-
-impl Drop for KillOnDrop {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
     }
 }
 
@@ -132,13 +123,14 @@ impl Session {
 }
 
 pub fn probe(argv: &[String], env_passthrough: &[String], opts: &ProbeOptions) -> Result<Surface> {
-    let mut child = spawn_server(argv, env_passthrough)?;
-    // Declared before the kill guard so it is dropped *after* it: the server is
-    // killed first, then buffered stderr gets a bounded grace period to drain.
-    let _relay = relay_stderr(&mut child, "server");
-    let stdout = child.stdout.take().context("server stdout")?;
-    let stdin = child.stdin.take().context("server stdin")?;
-    let _guard = KillOnDrop(child);
+    let mut server = spawn_server(argv, env_passthrough)?;
+    // Declared before `server` is moved into the guard below, so it is dropped
+    // *after* it: the tree is killed first, then buffered stderr gets a bounded
+    // grace period to drain.
+    let _relay = relay_stderr(&mut server, "server");
+    let stdout = server.take_stdout().context("server stdout")?;
+    let stdin = server.take_stdin().context("server stdin")?;
+    let _guard = server; // ServerProcess kills the whole tree on drop
     let (tx, rx) = mpsc::channel();
     let max = opts.max_line_bytes;
     thread::spawn(move || {

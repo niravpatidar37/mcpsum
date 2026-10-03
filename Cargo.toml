@@ -16,6 +16,10 @@ hex = "0.4.3"
 # default-features = false: no remote/file $ref resolution. An attacker-controlled
 # schema must never make us fetch URLs or read local files (SSRF / LFI).
 jsonschema = { version = "0.58.5", default-features = false }
+# Kill the whole server process tree, not just the direct child: process groups
+# on Unix, Job Objects on Windows (spawned suspended, assigned, then resumed, so a
+# grandchild cannot start outside the job). See src/process.rs and issue #7.
+process-wrap = { version = "10.0.1", default-features = false, features = ["std", "process-group", "job-object"] }
 regex = "1.13.1"
 serde = { version = "1", features = ["derive"] }
 serde_jcs = "0.2.0"
