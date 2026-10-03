@@ -5,3 +5,4 @@
 //! The I/O shell (`proxy`, `probe`) is kept thin.
 
 pub mod canon;
+pub mod lock;
