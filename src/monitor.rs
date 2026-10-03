@@ -1467,6 +1467,67 @@ mod tests {
     }
 
     #[test]
+    fn i7_redos_patterns_in_locked_schemas_run_in_linear_time() {
+        // Locked schemas are server-authored. A catastrophic pattern must
+        // either run in linear time or be refused at compile time (which
+        // denies every call to that tool: fail closed). It must never let a
+        // crafted argument stall the proxy.
+        let fast = |v: &jsonschema::Validator, instance: Value, what: &str| {
+            let started = std::time::Instant::now();
+            let _ = v.is_valid(&instance);
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(1),
+                "slow on {what}: {:?}",
+                started.elapsed()
+            );
+        };
+        let long = format!("{}!", "a".repeat(40)); // O(2^40) for a naive backtracker
+
+        // 1. Nested quantifier: supported by the linear engine. It must compile
+        //    in both regex keyword positions, and validate quickly.
+        let nested = "^(a+)+$";
+        let v =
+            compile_validator(&json!({"type": "object", "properties": {"s": {"type": "string", "pattern": nested}}}))
+                .expect("linear-engine pattern compiles");
+        fast(&v, json!({"s": long}), "pattern");
+        let v = compile_validator(&json!({"type": "object", "patternProperties": {nested: {"type": "string"}}}))
+            .expect("linear-engine pattern compiles");
+        fast(&v, json!({ long.clone(): "x" }), "patternProperties");
+
+        // 2. Lookahead and backreference need a backtracking engine. The linear
+        //    engine must refuse them, so the tool fails closed rather than
+        //    falling back to backtracking.
+        for evil in ["^(?=(a+)+$)", r"^(a+)+\1$"] {
+            let as_pattern = json!({"type": "object", "properties": {"s": {"type": "string", "pattern": evil}}});
+            let as_keys = json!({"type": "object", "patternProperties": {evil: {"type": "string"}}});
+            assert!(
+                compile_validator(&as_pattern).is_err(),
+                "{evil} must not compile as `pattern`"
+            );
+            assert!(
+                compile_validator(&as_keys).is_err(),
+                "{evil} must not compile as `patternProperties`"
+            );
+        }
+
+        // 3. `format: regex` (asserted under draft-07) compiles the *instance*
+        //    as a regex: feed it the catastrophic patterns as argument values.
+        let v = compile_validator(
+            &json!({"$schema": "http://json-schema.org/draft-07/schema#", "type": "object",
+                                          "properties": {"s": {"type": "string", "format": "regex"}}}),
+        )
+        .expect("format schema compiles");
+        for evil in [
+            nested,
+            "^(?=(a+)+$)",
+            r"^(a+)+\1$",
+            &format!("({}){{1000}}", "a+".repeat(200)),
+        ] {
+            fast(&v, json!({ "s": evil }), "format: regex");
+        }
+    }
+
+    #[test]
     fn i1_served_capabilities_never_advertise_list_changed_logging_or_completions() {
         let mut m = mon();
         let c = to_client(&init(&mut m, &surface()));

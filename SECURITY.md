@@ -10,7 +10,7 @@ reporting: **Security → Report a vulnerability** on this repository.
 
 Include:
 
-- which guarantee you bypassed (I1, I2, I3, I7, I8; see `docs/GUARANTEES.md` once published),
+- which guarantee you bypassed (I1, I2, I3, I7, I8; see [docs/GUARANTEES.md](docs/GUARANTEES.md)),
 - a minimal malicious server or message sequence that reproduces it,
 - the mcpsum version (`mcpsum --version`) and OS.
 
@@ -25,9 +25,10 @@ after approval, lets a call through for an unapproved tool or argument, forwards
 a server-initiated request to the client, makes the proxy fail open, or lets an
 audit-log edit go undetected.
 
-Known limitations (not vulnerabilities, documented in the README): no sandbox
-yet, no credential broker yet, tool *results* are passed through unfiltered,
-and trust-on-first-use at lock time.
+Known limitations (not vulnerabilities; see [docs/GUARANTEES.md § Limits](docs/GUARANTEES.md#limits)
+and the [threat model](docs/THREAT-MODEL.md)): no sandbox yet, no credential
+broker yet, tool *results* are passed through unfiltered, trust-on-first-use
+at lock time, and stdio transport only.
 
 ## Supported versions
 
