@@ -80,8 +80,18 @@ def test_I1_inline_rugpull_after_list_changed_quarantines(tmp_path, client_facto
     c = client_factory(lockp)
     c.initialize()
     assert c.call(1, "add", {"a": 1, "b": 2})["result"]["content"][0]["text"] == "3"
-    time.sleep(1.0)  # server swaps definitions and emits list_changed
-    r = c.call(2, "add", {"a": 1, "b": 2})
+    # The server swaps definitions and emits list_changed after that call. Keep
+    # calling until the proxy has re-verified; no fixed sleep, so no race.
+    deadline = time.monotonic() + 20
+    rid = 2
+    while True:
+        r = c.call(rid, "add", {"a": 1, "b": 2})
+        rid += 1
+        if "error" in r:
+            break
+        assert r["result"]["content"][0]["text"] == "3"
+        assert time.monotonic() < deadline, "server was never quarantined"
+        time.sleep(0.05)
     assert r["error"]["code"] == QUARANTINED
     assert not any(m.get("method", "").endswith("list_changed") for m in c.received)
     assert_clean(c)
@@ -149,7 +159,10 @@ def test_I7_spoofed_and_duplicate_responses_are_dropped(tmp_path, client_factory
     c.initialize()
     r = c.call(1, "add", {"a": 1, "b": 2})
     assert r["result"]["content"][0]["text"] == "3"
-    time.sleep(0.5)
+    # The server writes call 1's duplicate before it reads call 2, and the proxy
+    # handles server output in order: once call 2 is answered, the duplicate has
+    # already been processed (and must have been dropped). Deterministic, no sleep.
+    assert c.call(2, "add", {"a": 2, "b": 2})["result"]["content"][0]["text"] == "4"
     blob = c.everything_received()
     assert "FORGED" not in blob and "DUPLICATE" not in blob
 
@@ -211,3 +224,50 @@ def test_lock_time_findings_flag_hidden_characters_and_injection_markers(tmp_pat
     assert "<U+200B>" in out and "<important>" in out.lower() and "id_rsa" in out
     assert "\u200b" not in out
     lock_evil(tmp_path, "rugpull", poison_file=poison, extra=("--deny-findings",), expect_rc=2)
+
+
+# ------------------------------------------------- verify semantics
+
+def test_verify_ignores_informational_drift_unless_strict(tmp_path):
+    poison = tmp_path / "poison"
+    lockp = lock_evil(tmp_path, "version-bump", poison_file=poison)
+    poison.write_text("on")  # only serverInfo.version changes
+    r = run("verify", "--lock", str(lockp))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "serverInfo changed" in r.stdout
+    r = run("verify", "--lock", str(lockp), "--strict")
+    assert r.returncode == 1, r.stdout + r.stderr
+
+
+def test_relock_replaces_an_existing_lockfile(tmp_path):
+    poison = tmp_path / "poison"
+    lockp = lock_evil(tmp_path, "rugpull", poison_file=poison)
+    before = lockp.read_text()
+    poison.write_text("on")
+    lock_evil(tmp_path, "rugpull", poison_file=poison)  # same path, file exists
+    after = lockp.read_text()
+    assert before != after and "sidenote" in after
+    assert not (tmp_path / "mcp.lock.tmp").exists()
+
+
+# ------------------------------------------------- I7: availability under a wedged server
+
+def test_I7_deaf_server_cannot_hang_proxy_shutdown(tmp_path, client_factory):
+    lockp = lock_evil(tmp_path, "deaf")
+    c = client_factory(lockp)
+    c.initialize()
+    # Readiness is observable in the audit log; wait for it instead of sleeping.
+    deadline = time.monotonic() + 20
+    while "live definitions match mcp.lock" not in (c.audit.read_text() if c.audit.exists() else ""):
+        assert time.monotonic() < deadline, "proxy never became ready"
+        time.sleep(0.05)
+    big = "x" * 200_000
+    try:
+        for i in range(1, 51):  # ~10 MB the deaf server never reads: pipes and queue back up
+            c.send({"jsonrpc": "2.0", "id": i, "method": "tools/call", "params": {"name": "echo_text", "arguments": {"text": big}}})
+    except OSError:
+        pass  # proxy may already have failed closed and exited
+    c.p.stdin.close()
+    started = time.monotonic()
+    c.p.wait(timeout=20)  # raises TimeoutExpired if shutdown hangs on the blocked writer
+    assert time.monotonic() - started < 20

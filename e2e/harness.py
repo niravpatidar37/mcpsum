@@ -23,8 +23,10 @@ METHOD_NOT_FOUND = -32601
 def run(*args: str, timeout: int = 120, env: dict | None = None) -> subprocess.CompletedProcess:
     full_env = dict(os.environ)
     full_env.update(env or {})
-    return subprocess.run(
-        [BIN, *args], capture_output=True, text=True, encoding="utf-8", timeout=timeout, env=full_env
+    # Test harness: runs the mcpsum binary under test (BIN is set by our own CI)
+    # with list-form argv and no shell, so nothing is shell-interpreted.
+    return subprocess.run(  # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit, python.lang.security.audit.dangerous-subprocess-use-tainted-env-args
+        [BIN, *args], capture_output=True, text=True, encoding="utf-8", timeout=timeout, env=full_env, shell=False
     )
 
 
@@ -51,9 +53,10 @@ class Client:
         full_env = dict(os.environ)
         full_env.update(env or {})
         self.audit = lockp.parent / "audit.jsonl"
-        self.p = subprocess.Popen(
+        # Same justification as run(): binary under test, list-form argv, no shell.
+        self.p = subprocess.Popen(  # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit, python.lang.security.audit.dangerous-subprocess-use-tainted-env-args
             [BIN, "proxy", "--lock", str(lockp), "--name", name, "--audit", str(self.audit)],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=full_env,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=full_env, shell=False,
         )
         self.q: queue.Queue = queue.Queue()
         self.received: list[dict] = []
