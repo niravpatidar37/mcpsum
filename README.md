@@ -93,7 +93,7 @@ gh attestation verify mcpsum-x86_64-unknown-linux-musl.tar.gz --repo niravpatida
 Or **build from source** (Rust 1.88+):
 
 ```sh
-cargo install --git https://github.com/niravpatidar37/mcpsum --tag v0.1.0 --locked mcpsum
+cargo install --git https://github.com/niravpatidar37/mcpsum --tag v0.1.1 --locked mcpsum
 ```
 
 **1. Lock a server.** Pin the package version, so the code you reviewed is the code that runs:
