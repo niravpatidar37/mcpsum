@@ -148,7 +148,7 @@ not been tested end to end yet. Reports are welcome.
 
 ```sh
 mcpsum verify            # exit 1 on definitional drift
-mcpsum verify --strict   # also exit 1 on serverInfo/capability changes
+mcpsum verify --strict   # also exit 1 on serverInfo, capability or protocol-version changes
 mcpsum audit-verify .mcpsum-audit/time.jsonl
 ```
 
