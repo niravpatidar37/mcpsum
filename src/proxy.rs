@@ -7,7 +7,6 @@
 //! strictly ordered. Server writes go through a dedicated writer thread so a
 //! server that stops reading cannot stall the client side.
 
-use std::fs::{File, OpenOptions};
 use std::io::{BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, SyncSender, TrySendError};
@@ -17,7 +16,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use serde_json::Value;
 
-use crate::audit::{verify_chain, AuditLog};
+use crate::audit::{AppendAudit, AuditFile};
 use crate::framing::{BoundedLines, Frame};
 use crate::lock::LockFile;
 use crate::monitor::{Action, AuditEvent, Decision, Dir, Monitor, Policy};
@@ -39,37 +38,11 @@ fn unix_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// Open (or resume) the audit chain. A log that fails verification is moved
-/// aside, never appended to, so tampering stays visible.
-pub fn open_audit(path: &Path, server: &str) -> Result<AuditLog<File>> {
-    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
-        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    }
-    let (prev, seq) = match std::fs::read_to_string(path) {
-        Ok(text) => match verify_chain(&text) {
-            Ok((n, last)) => (Some(last), n),
-            Err(e) => {
-                let aside = path.with_extension(format!("corrupt-{}.jsonl", unix_ms()));
-                std::fs::rename(path, &aside)?;
-                eprintln!(
-                    "mcpsum: audit log {} failed verification ({e}); moved to {} and starting a new chain",
-                    path.display(),
-                    aside.display()
-                );
-                (None, 0)
-            }
-        },
-        Err(_) => (None, 0),
-    };
-    let file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .with_context(|| format!("opening {}", path.display()))?;
-    Ok(match prev {
-        Some(p) => AuditLog::resume(file, server, p, seq),
-        None => AuditLog::new(file, server),
-    })
+/// Open (or resume) the audit chain. Safe to call from several processes for
+/// the same log at once; see [`AuditFile`]. A log that fails verification is
+/// moved aside, never appended to, so tampering stays visible.
+pub fn open_audit(path: &Path, server: &str) -> Result<AuditFile> {
+    AuditFile::open(path, server)
 }
 
 pub fn default_audit_path(lock_path: &Path, server: &str) -> PathBuf {
@@ -209,7 +182,7 @@ pub fn run_proxy(lock_path: &Path, name: &str, audit_path: Option<PathBuf>, poli
 }
 
 /// Append every audit event in `actions` before any effect is executed.
-fn write_ahead<W: Write>(audit: &mut AuditLog<W>, actions: &[Action], name: &str) -> Result<()> {
+fn write_ahead<A: AppendAudit>(audit: &mut A, actions: &[Action], name: &str) -> Result<()> {
     for a in actions {
         if let Action::Audit(e) = a {
             if matches!(e.decision, Decision::Deny | Decision::Quarantine) {
@@ -222,7 +195,7 @@ fn write_ahead<W: Write>(audit: &mut AuditLog<W>, actions: &[Action], name: &str
                 );
             }
             audit
-                .append(e, unix_ms())
+                .append_event(e, unix_ms())
                 .context("audit log write failed; refusing to forward (fail closed)")?;
         }
     }
@@ -254,6 +227,7 @@ fn spawn_reader<R: std::io::Read + Send + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audit::{verify_chain, AuditLog};
 
     /// A writer that fails, like a full disk.
     struct FailingWriter;
@@ -298,6 +272,34 @@ mod tests {
             reason: "x".into(),
             args_digest: None,
         }
+    }
+
+    #[test]
+    fn concurrent_writers_keep_one_valid_chain() {
+        // Two MCP hosts (e.g. VS Code's extension host and Agent Host) run a
+        // proxy for the same server at once, each with its own handle on one
+        // log. Their appends must serialize into a single verifiable chain (#29).
+        let dir = std::env::temp_dir().join(format!("mcpsum-audit-race-{}-{}", std::process::id(), unix_ms()));
+        let path = dir.join("s.jsonl");
+        let (writers, per) = (8u64, 50u64);
+        let handles: Vec<_> = (0..writers)
+            .map(|w| {
+                let path = path.clone();
+                thread::spawn(move || {
+                    let mut a = open_audit(&path, "s").unwrap();
+                    for i in 0..per {
+                        a.append(&ev(), w * 1000 + i).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        let text = std::fs::read_to_string(&path).unwrap();
+        let (n, _) = verify_chain(&text).unwrap_or_else(|e| panic!("chain forked: {e}"));
+        assert_eq!(n, writers * per);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
