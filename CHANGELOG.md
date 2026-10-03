@@ -10,6 +10,10 @@ All notable changes are recorded here. The format follows
 - Kill the whole server process tree, not just the direct child: process groups on Unix,
   Job Objects on Windows (assigned before the server can start anything). Grandchildren
   left by launchers like `npx`/`uvx` no longer outlive mcpsum (#7).
+- Audit log stays one valid chain when several proxies for the same server run at once
+  (VS Code runs servers in two processes). Appends take a cross-process lock, re-read the
+  chain head and check its hash first; previously concurrent writes forked the chain and
+  could even interleave half-lines (#29).
 
 ## [0.1.0] - 2026-10-03
 

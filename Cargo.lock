@@ -486,6 +486,7 @@ dependencies = [
  "clap",
  "hex",
  "jsonschema",
+ "nix",
  "process-wrap",
  "proptest",
  "regex",
@@ -493,6 +494,7 @@ dependencies = [
  "serde_jcs",
  "serde_json",
  "sha2",
+ "windows-sys",
 ]
 
 [[package]]

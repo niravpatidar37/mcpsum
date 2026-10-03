@@ -327,3 +327,23 @@ def test_proxy_kills_server_grandchildren_on_shutdown(tmp_path, client_factory):
     c.p.stdin.close()
     c.p.wait(timeout=20)
     _assert_heartbeat_stops(hb)
+
+
+# ------------------------------------------------- I8 with concurrent proxies (#29)
+
+def test_I8_two_proxies_for_one_server_keep_one_valid_chain(tmp_path, client_factory):
+    # VS Code runs MCP servers in two processes at once (extension host and
+    # Agent Host), so two proxies for the same server share one audit log.
+    lockp = lock_evil(tmp_path, "clean")
+    a, b = client_factory(lockp), client_factory(lockp)
+    a.initialize()
+    b.initialize()
+    for i in range(1, 11):
+        assert a.call(i, "add", {"a": i, "b": 1})["result"]["content"][0]["text"] == str(i + 1)
+        assert b.call(i, "add", {"a": i, "b": 2})["result"]["content"][0]["text"] == str(i + 2)
+    for c in (a, b):
+        c.p.stdin.close()
+        c.p.wait(timeout=20)
+    r = run("audit-verify", str(a.audit))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert not list(tmp_path.glob("*.corrupt-*")), "a valid log was moved aside"

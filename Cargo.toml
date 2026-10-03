@@ -26,6 +26,15 @@ serde_jcs = "0.2.0"
 serde_json = "1.0.151"
 sha2 = "0.11.0"
 
+# Cross-process audit-log locks (src/filelock.rs). Same versions process-wrap
+# and clap already pull in, so no new crates; replace with std File::try_lock
+# once the MSRV reaches 1.89.
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.31", default-features = false, features = ["fs"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_IO"] }
+
 [dev-dependencies]
 proptest = "1.11.0"
 
