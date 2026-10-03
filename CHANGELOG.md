@@ -6,6 +6,10 @@ All notable changes are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-03
+
+Security fixes found by testing v0.1.0 in real clients. Upgrading is recommended.
+
 ### Security
 - Kill the whole server process tree, not just the direct child: process groups on Unix,
   Job Objects on Windows (assigned before the server can start anything). Grandchildren
