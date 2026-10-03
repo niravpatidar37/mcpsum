@@ -1,0 +1,20 @@
+# MergeCode: advisory merge-worthiness review of every PR (.github/workflows/mergecode.yml).
+# Read from the PR's BASE commit, so a PR cannot relax these rules for itself.
+version: 1
+verify:
+  # Run in a fresh copy of the base repo with the PR applied. Mirrors the `lint`
+  # and `test` CI jobs; the adversarial e2e suite stays in ci.yml.
+  commands:
+    - cargo fmt --all --check
+    - cargo clippy --all-targets --locked -- -D warnings
+    - cargo test --locked --all-targets
+  timeoutMs: 1200000
+rubric:
+  hardGates:
+    failOnVerificationFailure: true
+    # Editing an assertion shows up as delete + add, so a hard REJECT here would fire
+    # on ordinary test changes. Deleted assertions are flagged (REQUEST_CHANGES) instead.
+    failOnDeletedTests: false
+    requestChangesOnDependencyChange: true
+llm:
+  enabled: false
