@@ -96,10 +96,10 @@ pub fn run_proxy(lock_path: &Path, name: &str, audit_path: Option<PathBuf>, poli
     let mut monitor = Monitor::new(server.clone(), policy);
 
     let mut child = spawn_server(&server.command, &server.env_passthrough)?;
-    // Dropped at return, after the server is killed below: bounded drain.
+    // Dropped at return, after the server tree is killed below: bounded drain.
     let _relay = relay_stderr(&mut child, name);
-    let child_stdout = child.stdout.take().context("server stdout")?;
-    let mut child_stdin = child.stdin.take().context("server stdin")?;
+    let child_stdout = child.take_stdout().context("server stdout")?;
+    let mut child_stdin = child.take_stdin().context("server stdin")?;
 
     let (tx, rx) = mpsc::sync_channel::<Event>(64);
     spawn_reader(tx.clone(), std::io::stdin(), max, Event::Client, Event::ClientEof);
@@ -195,22 +195,12 @@ pub fn run_proxy(lock_path: &Path, name: &str, audit_path: Option<PathBuf>, poli
         }
     }
     // Shutdown. Close the server's input, give it a moment to exit, then kill
-    // it. Only then join the writer: if the server stopped reading, the writer
-    // is blocked in write_all and only a broken pipe (the kill) releases it.
+    // the whole process tree (unconditionally: a server that exits cleanly may
+    // still leave descendants). Only then join the writer: if the server
+    // stopped reading, the writer is blocked in write_all and only a broken
+    // pipe (the kill) releases it.
     drop(to_server);
-    let deadline = Instant::now() + Duration::from_secs(2);
-    let mut exited = false;
-    while Instant::now() < deadline {
-        if let Ok(Some(_)) = child.try_wait() {
-            exited = true;
-            break;
-        }
-        thread::sleep(Duration::from_millis(50));
-    }
-    if !exited {
-        let _ = child.kill();
-        let _ = child.wait();
-    }
+    child.shutdown(Duration::from_secs(2));
     let _ = writer.join();
     match fatal {
         Some(e) => Err(e),

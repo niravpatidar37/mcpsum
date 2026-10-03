@@ -8,9 +8,15 @@
 use std::ffi::OsString;
 use std::io::{BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{ChildStderr, ChildStdin, ChildStdout, Stdio};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
+
+#[cfg(windows)]
+use process_wrap::std::JobObject;
+#[cfg(unix)]
+use process_wrap::std::ProcessGroup;
+use process_wrap::std::{ChildWrapper, CommandWrap};
 
 use crate::framing::{BoundedLines, Frame};
 use crate::render::escape_untrusted;
@@ -104,23 +110,99 @@ pub fn resolve_program(prog: &str) -> PathBuf {
     p.to_path_buf()
 }
 
-/// Spawn a server with piped stdio and a scrubbed environment. stderr is
-/// piped too: it is server-authored text, so it is relayed through
-/// [`relay_stderr`] rather than inherited (raw bytes could carry terminal
-/// escape sequences that hide or forge mcpsum's own output).
-pub fn spawn_server(argv: &[String], passthrough: &[String]) -> Result<Child> {
+/// A running MCP server **and every process it starts**.
+///
+/// On Unix the server leads a new process group; on Windows it runs in a Job
+/// Object (it is created suspended and only resumed once assigned, so nothing
+/// it starts can escape the job). Killing therefore reaches grandchildren that
+/// launchers such as `npx`/`uvx` leave behind, which would otherwise keep
+/// running unmediated and keep our stderr pipe open.
+///
+/// Limits: on Unix a process can leave the group with `setsid()`/`setpgid()`;
+/// containing that needs the sandbox (PID namespaces or cgroups, issue #14).
+/// The tree is killed on every normal exit, error and panic of mcpsum, but not
+/// if mcpsum itself is killed abruptly (SIGKILL, TerminateProcess). The server's
+/// stdin then closes, and well-behaved servers exit on their own.
+pub struct ServerProcess {
+    child: Box<dyn ChildWrapper>,
+    done: bool,
+}
+
+/// How long to wait for the tree to be gone after it has been killed.
+const REAP_TIMEOUT: Duration = Duration::from_secs(2);
+
+impl ServerProcess {
+    pub fn take_stdin(&mut self) -> Option<ChildStdin> {
+        self.child.stdin().take()
+    }
+
+    pub fn take_stdout(&mut self) -> Option<ChildStdout> {
+        self.child.stdout().take()
+    }
+
+    pub fn take_stderr(&mut self) -> Option<ChildStderr> {
+        self.child.stderr().take()
+    }
+
+    /// Give the server up to `grace` to exit on its own (call this after its
+    /// stdin has been closed), then kill the whole tree. The kill is
+    /// unconditional: a server that exits cleanly may still leave descendants.
+    /// Every wait is bounded, so this never hangs on a process that refuses to die.
+    pub fn shutdown(&mut self, grace: Duration) {
+        if self.done {
+            return;
+        }
+        self.done = true;
+        let deadline = Instant::now() + grace;
+        while Instant::now() < deadline {
+            match self.child.try_wait() {
+                Ok(None) => thread::sleep(Duration::from_millis(50)),
+                _ => break,
+            }
+        }
+        let _ = self.child.start_kill();
+        let deadline = Instant::now() + REAP_TIMEOUT;
+        while Instant::now() < deadline {
+            match self.child.try_wait() {
+                Ok(None) => thread::sleep(Duration::from_millis(20)),
+                _ => break,
+            }
+        }
+    }
+}
+
+impl Drop for ServerProcess {
+    fn drop(&mut self) {
+        self.shutdown(Duration::ZERO);
+    }
+}
+
+/// Spawn a server with piped stdio and a scrubbed environment, as the leader of
+/// its own process tree (see [`ServerProcess`]). stderr is piped too: it is
+/// server-authored text, so it is relayed through [`relay_stderr`] rather than
+/// inherited (raw bytes could carry terminal escape sequences that hide or
+/// forge mcpsum's own output).
+pub fn spawn_server(argv: &[String], passthrough: &[String]) -> Result<ServerProcess> {
     let (prog, args) = argv.split_first().context("empty server command")?;
     validate_env_names(passthrough)?;
     let resolved = resolve_program(prog);
-    Command::new(&resolved)
-        .args(args)
-        .env_clear()
-        .envs(scrubbed_env(passthrough))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+    let env = scrubbed_env(passthrough);
+    let mut cmd = CommandWrap::with_new(&resolved, |c| {
+        c.args(args)
+            .env_clear()
+            .envs(env)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+    });
+    #[cfg(unix)]
+    cmd.wrap(ProcessGroup::leader());
+    #[cfg(windows)]
+    cmd.wrap(JobObject);
+    let child = cmd
         .spawn()
-        .with_context(|| format!("failed to start MCP server `{}`", resolved.display()))
+        .with_context(|| format!("failed to start MCP server `{}`", resolved.display()))?;
+    Ok(ServerProcess { child, done: false })
 }
 
 /// Longest server stderr line relayed; the rest is dropped (flood control).
@@ -175,10 +257,10 @@ impl Drop for StderrRelay {
     }
 }
 
-/// Relay a child's stderr to ours on a background thread, line by line,
+/// Relay a server's stderr to ours on a background thread, line by line,
 /// through [`render_stderr_line`].
-pub fn relay_stderr(child: &mut Child, name: &str) -> StderrRelay {
-    relay_to(child.stderr.take(), name, STDERR_DRAIN_GRACE, std::io::stderr)
+pub fn relay_stderr(server: &mut ServerProcess, name: &str) -> StderrRelay {
+    relay_to(server.take_stderr(), name, STDERR_DRAIN_GRACE, std::io::stderr)
 }
 
 fn relay_to<R, W, F>(src: Option<R>, name: &str, grace: Duration, sink: F) -> StderrRelay

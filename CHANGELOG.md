@@ -6,6 +6,11 @@ All notable changes are recorded here. The format follows
 
 ## [Unreleased]
 
+### Security
+- Kill the whole server process tree, not just the direct child: process groups on Unix,
+  Job Objects on Windows (assigned before the server can start anything). Grandchildren
+  left by launchers like `npx`/`uvx` no longer outlive mcpsum (#7).
+
 ## [0.1.0] - 2026-10-03
 
 First release. stdio transport only; see the limits in the README.
