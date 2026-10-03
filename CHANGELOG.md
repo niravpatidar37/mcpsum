@@ -24,5 +24,7 @@ All notable changes are recorded here. The format follows
 - Withhold server-authored `initialize` error text (I1 gap found by the property test, #4).
 - Write audit entries before their effects, and stop if the log cannot be written (#3).
 - A server that stops reading its input can no longer hang the proxy (#3).
+- ReDoS guard: regexes in locked schemas run on a linear-time engine; backtracking-only
+  patterns are refused at compile time, so the tool fails closed (#9).
 - Relay server stderr escaped instead of raw, closing a terminal-injection path; drain it
   within a bounded grace period; never skip server shutdown on a fatal proxy error (#6).

@@ -139,6 +139,8 @@ quarantine it and exit, rather than hang.
 `i7_duplicate_pending_client_id_rejected`,
 `i7_spoofed_and_duplicate_responses_are_dropped`,
 `i7_client_cancel_is_translated_to_proxy_id`,
+`i7_redos_patterns_in_locked_schemas_run_in_linear_time` (catastrophic regexes in locked
+schemas run in linear time or fail closed at compile time),
 `write_ahead_fails_closed_when_audit_cannot_be_written` (`src/proxy.rs`).
 e2e: `test_I7_spoofed_and_duplicate_responses_are_dropped`,
 `test_I7_garbage_oversize_and_log_injection_are_dropped`,

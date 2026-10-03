@@ -177,7 +177,7 @@ Read this before you rely on mcpsum. Details: [GUARANTEES.md § Limits](docs/GUA
 
 ## How it is verified
 
-- **74 unit tests** across the monitor, lockfile, audit log, framing, rendering, process and proxy.
+- **75 unit tests** across the monitor, lockfile, audit log, framing, rendering, process and proxy.
 - **Property tests**: 6,000 random adversarial sessions per run, checked after every
   step against an independent oracle. The first run found a real I1 gap, which was then
   fixed (#4).
