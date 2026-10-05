@@ -15,3 +15,4 @@ pub mod process;
 pub mod proxy;
 pub mod render;
 pub mod report;
+pub mod taint;
