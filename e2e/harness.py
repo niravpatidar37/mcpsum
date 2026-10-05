@@ -9,6 +9,7 @@ import queue
 import subprocess
 import sys
 import threading
+import time
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 EXE = "mcpsum.exe" if os.name == "nt" else "mcpsum"
@@ -96,10 +97,12 @@ class Client:
                 return got
             self.unsolicited.append(got)
 
-    def initialize(self) -> dict:
+    def initialize(self, capabilities: dict | None = None) -> dict:
+        if capabilities is None:
+            capabilities = {"sampling": {}, "elicitation": {}, "roots": {"listChanged": True}}
         r = self.request(0, "initialize", {
             "protocolVersion": "2025-06-18",
-            "capabilities": {"sampling": {}, "elicitation": {}, "roots": {"listChanged": True}},
+            "capabilities": capabilities,
             "clientInfo": {"name": "e2e", "version": "1"},
         })
         self.send({"jsonrpc": "2.0", "method": "notifications/initialized"})
@@ -107,6 +110,29 @@ class Client:
 
     def call(self, rid, name: str, args: dict) -> dict:
         return self.request(rid, "tools/call", {"name": name, "arguments": args})
+
+    def next_request(self, method: str, timeout: float = 20) -> dict:
+        """Wait for a request *to the client* (only mcpsum's own approval prompts)."""
+        deadline = time.monotonic() + timeout
+        for i, m in enumerate(self.unsolicited):
+            if m.get("method") == method and "id" in m:
+                return self.unsolicited.pop(i)
+        while True:
+            got = self.q.get(timeout=max(0.01, deadline - time.monotonic()))
+            if got.get("method") == method and "id" in got:
+                return got
+            self.unsolicited.append(got)
+
+    def wait_response(self, rid, timeout: float = 20) -> dict:
+        deadline = time.monotonic() + timeout
+        for i, m in enumerate(self.unsolicited):
+            if m.get("id") == rid and "method" not in m:
+                return self.unsolicited.pop(i)
+        while True:
+            got = self.q.get(timeout=max(0.01, deadline - time.monotonic()))
+            if got.get("id") == rid and "method" not in got:
+                return got
+            self.unsolicited.append(got)
 
     def everything_received(self) -> str:
         return json.dumps(self.received, ensure_ascii=False)

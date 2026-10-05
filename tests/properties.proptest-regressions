@@ -5,3 +5,6 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc cf352e999e9219d502279cb020b58fb2c016224944dcebb01af28aedeffc8f71 # shrinks to ops = [Client(Initialize), Server(Respond { k: 0, payload: Error })]
+cc a5574445e14018c824ee601bc3f300bcb470de610d72f6a16547d7ef1c601f10 # shrinks to ops = [Client(Read("file:///readme.md")), Server(Respond { k: 0, payload: Clean }), Server(ListChanged), Client(Call { name: "add", args: Object {"a": Number(1), "b": Number(2)} }), Server(Respond { k: 0, payload: Clean }), Server(Respond { k: 0, payload: Clean }), Server(Respond { k: 0, payload: Clean }), Server(Respond { k: 0, payload: Clean })]
+cc 3deb6cc1f2834d5ad4a4c009b2ef1043c7d44ca68e6fa4f6be75b40627e6c569 # shrinks to ops = [Client(Read("file:///readme.md")), Server(Respond { k: 0, payload: Clean }), Client(Call { name: "add", args: Object {"a": Number(1), "b": Number(2)} }), Client(Answer { k: 0, reply: AllowFalse })]
+cc f680cea840805c45bb87f42e7d4fedca4fc0ddec27b963a149581ed0af0c126b # shrinks to ops = [Client(Read("file:///readme.md")), Server(Respond { k: 0, payload: Clean }), Client(Call { name: "add", args: Object {"a": Number(1), "b": Number(2)} }), Client(Answer { k: 0, reply: Allow })]

@@ -164,6 +164,9 @@ pub fn run_proxy(lock_path: &Path, name: &str, audit_path: Option<PathBuf>, poli
                     }
                 }
                 Action::Audit(_) => {} // already written ahead
+                // Taint lives in the monitor for now; sharing it across the
+                // proxies of one client session is design 0001, step 3.
+                Action::Taint { .. } => {}
             }
         }
     }

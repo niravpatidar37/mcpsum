@@ -159,7 +159,16 @@ fn cmd_lock(
         ..ProbeOptions::default()
     };
     let surface = probe(&command, &env, &opts)?;
-    let entry = ServerLock::from_surface(command, env, surface)?;
+    let mut entry = ServerLock::from_surface(command, env, surface)?;
+    // The policy is the user's decision, not the server's: keep it on re-lock.
+    if let Some(old) = lf.servers.get(name) {
+        for label in entry.carry_policy_from(old) {
+            println!(
+                "policy: dropped `{}` (that tool is gone; relabel it if it was renamed)",
+                escape_untrusted(&label)
+            );
+        }
+    }
 
     let others: Vec<(&str, &mcpsum::lock::Surface)> = lf
         .servers

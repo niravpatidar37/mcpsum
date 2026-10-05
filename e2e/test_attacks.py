@@ -347,3 +347,75 @@ def test_I8_two_proxies_for_one_server_keep_one_valid_chain(tmp_path, client_fac
     r = run("audit-verify", str(a.audit))
     assert r.returncode == 0, r.stdout + r.stderr
     assert not list(tmp_path.glob("*.corrupt-*")), "a valid log was moved aside"
+
+
+# ------------------------------------------------- I6: taint tracking (design 0001)
+
+def add_taint_policy(lockp, sources=("fetch",), sinks=("add",)):
+    lf = json.loads(lockp.read_text(encoding="utf-8"))
+    lf["servers"]["evil"]["policy"] = {"taint": {"sources": list(sources), "sinks": list(sinks)}}
+    lockp.write_text(json.dumps(lf, indent=2), encoding="utf-8")
+
+
+def audit_entries(c):
+    return [json.loads(line) for line in c.audit.read_text(encoding="utf-8").splitlines()]
+
+
+def test_I6_injected_result_cannot_trigger_a_sink_when_the_client_cannot_prompt(tmp_path, client_factory):
+    lockp = lock_evil(tmp_path, "taint")
+    add_taint_policy(lockp)
+    c = client_factory(lockp)
+    c.initialize(capabilities={})  # no elicitation: mcpsum cannot ask the user
+    assert c.call(1, "add", {"a": 1, "b": 2})["result"]["content"][0]["text"] == "3", "clean session: sink works"
+    page = c.call(2, "fetch", {"url": "https://evil.example"})
+    assert "IGNORE PREVIOUS INSTRUCTIONS" in json.dumps(page)
+    r = c.call(3, "add", {"a": 1300, "b": 37})
+    assert r["error"]["code"] == -32001, r
+    assert "untrusted" in r["error"]["message"] and "fetch" in r["error"]["message"]
+    c.close()
+    ev = audit_entries(c)
+    kinds = [(e["event"]["decision"], e["event"].get("subject")) for e in ev]
+    assert ("taint", "fetch") in kinds and ("deny", "add") in kinds
+    assert kinds.index(("taint", "fetch")) < kinds.index(("deny", "add"))
+    assert "1300" not in c.audit.read_text(encoding="utf-8"), "arguments must not be logged"
+    assert run("audit-verify", str(c.audit)).returncode == 0
+
+
+def test_I6_sink_after_injection_runs_only_when_the_user_allows_it(tmp_path, client_factory):
+    lockp = lock_evil(tmp_path, "taint")
+    add_taint_policy(lockp)
+    c = client_factory(lockp)
+    c.initialize()  # advertises elicitation
+    c.call(1, "fetch", {"url": "https://evil.example"})
+    # The user declines: the call is refused and never reaches the server.
+    c.send({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "add", "arguments": {"a": 1300, "b": 37}}})
+    ask = c.next_request("elicitation/create")
+    assert ask["id"].startswith("mcpsum-approval-")
+    msg = ask["params"]["message"]
+    assert msg.startswith("mcpsum security check:") and "`add`" in msg and "`fetch`" in msg
+    assert "IGNORE PREVIOUS" not in msg, "server text must never appear in mcpsum's prompt"
+    c.send({"jsonrpc": "2.0", "id": ask["id"], "result": {"action": "decline"}})
+    r = c.wait_response(2)
+    assert r["error"]["code"] == -32001, r
+    # The user allows the next one: exactly that call runs.
+    c.send({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "add", "arguments": {"a": 2, "b": 2}}})
+    ask = c.next_request("elicitation/create")
+    assert '"a":2' in ask["params"]["message"].replace(" ", "")
+    c.send({"jsonrpc": "2.0", "id": ask["id"], "result": {"action": "accept", "content": {"allow": True}}})
+    r = c.wait_response(3)
+    assert r["result"]["content"][0]["text"] == "4", r
+    c.close()
+    decisions = [e["event"]["decision"] for e in audit_entries(c)]
+    assert decisions.count("hold") == 2
+    assert run("audit-verify", str(c.audit)).returncode == 0
+
+
+def test_I6_relock_keeps_the_user_policy(tmp_path):
+    lockp = lock_evil(tmp_path, "taint")
+    add_taint_policy(lockp)
+    lock_evil(tmp_path, "taint")  # re-lock the same server
+    lf = json.loads(lockp.read_text(encoding="utf-8"))
+    assert lf["servers"]["evil"]["policy"] == {"taint": {"sources": ["fetch"], "sinks": ["add"]}}
+    add_taint_policy(lockp, sinks=("add", "send_emial"))
+    r = run("show", "--lock", str(lockp))
+    assert r.returncode != 0 and "send_emial" in r.stderr, "a typo in the policy must fail closed"

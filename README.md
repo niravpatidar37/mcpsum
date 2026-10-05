@@ -45,6 +45,7 @@ enforce anything.
 | **I1** | **Definitions are served from `mcp.lock`.** Tool, prompt and resource lists, instructions and server info come from the file you reviewed. Live definitions are only *compared* with it; any change quarantines the server. |
 | **I2** | **Calls are checked against the locked schema, strictly.** Unapproved tools and hidden extra arguments (`sidenote: <your SSH key>`) are refused before they reach the server. |
 | **I3** | **Deny by default, both ways.** Servers cannot sample your model, elicit input from your user or list your roots. Unknown methods are refused. |
+| **I6** | **Untrusted results can't silently trigger sensitive calls** (opt-in, preview). Label tools as sources and sinks in `mcp.lock`; after a source's result, a sink call needs your approval in mcpsum's own prompt, or is refused. |
 | **I7** | **Fail closed.** Malformed, oversize, batched, spoofed or out-of-order messages are dropped; a server that wedges its pipe is quarantined. |
 | **I8** | **Hash-chained audit log** of every decision. Argument values are never logged, only their digest. |
 
@@ -181,7 +182,8 @@ Read this before you rely on mcpsum. Details: [GUARANTEES.md § Limits](docs/GUA
   ([Koi Security](https://www.koi.security/blog/postmark-mcp-npm-malicious-backdoor-email-theft)).
   Pinning versions helps. A sandbox with an egress allowlist is milestone M2.
 - **It does not filter tool results.** A prompt injection inside a web page or an email
-  that a tool returns can still reach the model. Taint tracking is milestone M3.
+  that a tool returns can still reach the model. With a taint policy (I6, opt-in) it can't
+  silently trigger a sink; today that is tracked per server, across servers is next (M3).
 - **stdio only** for now. No remote/HTTP transport yet, and no 2026-07-28 `server/discover`.
 
 ## How it is verified
@@ -207,7 +209,7 @@ Read this before you rely on mcpsum. Details: [GUARANTEES.md § Limits](docs/GUA
 |---|---|
 | **M1** (now) | Lockfile, proxy, CLI, test suite, docs, signed release binaries |
 | **M2** | Sandbox with a per-server network egress allowlist; credential broker (servers get scoped tokens, not your secrets) |
-| **M3** | Taint tracking: untrusted results cannot flow into sensitive calls without approval (Cedar policies) |
+| **M3** | Taint tracking: untrusted results cannot trigger sensitive calls without approval. Per-server preview shipped; next: shared across servers, `taint reset`, suggested policies; later per-argument rules |
 | **M4** | Benchmarks (AgentDojo-style), public bypass challenge |
 | **M5** | Public transparency log of definitions (like Go's checksum database), microVM backend, external audit |
 
