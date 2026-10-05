@@ -6,6 +6,15 @@ All notable changes are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+- I6 taint tracking, opt-in and per server (preview, #16). A user-written `policy.taint`
+  section in `mcp.lock` labels tools as sources and sinks. After a source's result (or
+  error, or progress message) reaches the client, a sink call is held for the user's
+  approval through mcpsum's own `elicitation/create` prompt and forwarded only on an
+  explicit allow, or refused with `-32001` when the client cannot show prompts. Policies
+  naming unlocked tools are rejected, and `lock` keeps the policy on re-lock. Design:
+  `docs/design/0001-taint-tracking.md`.
+
 ## [0.1.1] - 2026-10-03
 
 Security fixes found by testing v0.1.0 in real clients. Upgrading is recommended.

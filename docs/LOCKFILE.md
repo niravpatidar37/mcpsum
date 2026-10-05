@@ -55,7 +55,42 @@ use a lockfile whose digests do not match its contents.
 | `envPassthrough` | **Names** of environment variables passed to the server. Values are never stored. Everything else is withheld. |
 | `protocolVersion`, `serverInfo`, `capabilities`, `instructions` | What the server reported at lock time. Served to the client from here. Changes count as *informational* drift, except `instructions`, which is definitional. |
 | `tools`, `prompts`, `resources`, `resourceTemplates` | The full definitions as returned by the server (all pages), keyed by `name`, `name`, `uri` and `uriTemplate`. Served to the client from here. Capped at 1,000 items per kind. |
+| `policy` | Optional, written by **you** (never by the server). See [Policy](#policy-optional-i6). Not covered by `digests`, and kept when the server is re-locked. |
 | `digests` | SHA-256 over the RFC 8785 canonical JSON of each item, plus one over the whole surface. mcpsum recomputes them on load and refuses a lockfile that does not match. |
+
+## Policy (optional, I6)
+
+Add a `policy` section to a server entry to turn on taint tracking for it:
+
+```json
+"policy": {
+  "taint": {
+    "sources": ["fetch", "resources:*"],
+    "sinks": ["fetch", "send_email"]
+  }
+}
+```
+
+| Key | Meaning |
+|---|---|
+| `taint.sources` | Tools whose **results** may contain text an attacker controls: web pages, emails, issues, documents. `resources:*` means every `resources/read`; `prompts:*` means every `prompts/get`. |
+| `taint.sinks` | Tools whose **calls** have consequences or can carry data out: send, write, delete, create, pay. A tool that fetches a URL is both, because the URL itself can carry data out. |
+
+After a source's result reaches the client, every call to a sink needs your
+approval through mcpsum's prompt, or is refused if your client cannot show one.
+See [I6](GUARANTEES.md#i6--untrusted-results-cannot-silently-trigger-sinks-opt-in-preview).
+
+Rules:
+
+- Every name must be a locked tool (or one of the two wildcards). A misspelled
+  name is an error, so a typo cannot silently leave a tool unprotected. Unknown
+  keys are errors too.
+- Tool annotations (`readOnlyHint`, `destructiveHint`, `openWorldHint`) are
+  hints written by the server. Use them to help you decide, but mcpsum never
+  applies them on its own.
+- When you re-lock a server, its policy is kept. Labels for tools that no
+  longer exist are dropped and `lock` prints them. A renamed tool is **not**
+  protected until you label it again.
 
 ## Drift classes
 

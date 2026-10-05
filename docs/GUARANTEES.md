@@ -9,7 +9,7 @@ that check it.
 Three kinds of test back the guarantees:
 
 - **Unit tests** (`src/monitor.rs`): one per behaviour, named `iN_...`.
-- **Property tests** (`tests/properties.rs`): 6,000 random adversarial
+- **Property tests** (`tests/properties.rs`): 9,000 random adversarial
   sessions per run, checked after every step against an *independent* oracle
   (written separately from the monitor, in the spirit of differential testing
   in Cedar's verification-guided development, [arXiv:2407.01688](https://arxiv.org/abs/2407.01688)).
@@ -117,6 +117,60 @@ cannot use them.
 e2e: `test_I3_server_initiated_requests_never_reach_client`,
 `test_I3_modern_discover_is_denied_by_default`. Property: invariant I3.
 
+## I6 — Untrusted results cannot silently trigger sinks (opt-in, preview)
+
+**Statement.** If the server's entry in `mcp.lock` has a `policy.taint` section
+(see [LOCKFILE.md](LOCKFILE.md#policy-optional-i6)), then once a result from a
+**source** has been delivered to the client, a call to a **sink** is never
+forwarded silently:
+
+- If the client supports form prompts (`elicitation`), mcpsum holds the call and
+  asks the user with **its own** prompt: the tool, the source that tainted the
+  session, and the arguments, escaped and truncated. Only an explicit
+  `accept` with `allow: true` forwards **exactly that call**, once. Decline,
+  cancel, an error, anything malformed, or 60 s without an answer refuses it
+  with `-32001`. A quarantine refuses every held call.
+- Otherwise the call is refused with `-32001`.
+
+The session is marked tainted **before** the untrusted text is delivered
+(write-ahead), including error messages and progress messages from a source.
+Only the user clears the taint; in this preview that means restarting the client
+session. Labels come only from the user's policy, never from server-written
+annotations (the MCP specification says not to trust those). A label that names
+a tool which isn't locked is an error, so a typo cannot silently leave a tool
+unprotected. Without a policy, behaviour is exactly as before.
+
+This is the defence pattern from the prompt-injection literature: constrain what
+may happen *after* untrusted data has been read, deterministically and outside
+the model, instead of trying to detect injected text
+([CaMeL](https://arxiv.org/abs/2503.18813), [FIDES](https://arxiv.org/abs/2505.23643),
+[design patterns](https://arxiv.org/abs/2506.08837)). Design and alternatives:
+[design 0001](design/0001-taint-tracking.md).
+
+**Preview limits.** The taint is tracked **per server** (per proxy). That covers
+flows inside one server, such as the GitHub MCP exploit where a malicious public
+issue led the agent to leak private repositories through the same server
+([Invariant Labs](https://invariantlabs.ai/blog/mcp-github-vulnerability)).
+Sharing taint across all servers of one client session, and `mcpsum taint reset`,
+come next (#16). The guarantee is coarse (every sink after any source needs
+approval) and only as good as the user's decision.
+
+**Tests.** `i6_source_result_taints_the_session_before_it_reaches_the_client`,
+`i6_tainted_sink_is_held_and_forwarded_exactly_once_on_explicit_allow`,
+`i6_anything_but_explicit_allow_denies_the_held_call`,
+`i6_tainted_sink_is_refused_when_the_client_cannot_show_a_prompt`,
+`i6_approval_prompt_names_tool_and_source_and_escapes_the_arguments`,
+`i6_unanswered_approval_times_out_denies_and_withdraws_the_prompt`,
+`i6_quarantine_denies_held_calls`,
+`i6_progress_text_from_a_source_taints_before_it_is_delivered`,
+`i6_policy_naming_an_unlocked_tool_is_rejected` and the other `i6_*` unit tests.
+e2e: `test_I6_injected_result_cannot_trigger_a_sink_when_the_client_cannot_prompt`,
+`test_I6_sink_after_injection_runs_only_when_the_user_allows_it`,
+`test_I6_relock_keeps_the_user_policy`.
+Property: `i6_taint_invariants_hold_under_a_policy` (no sink after taint
+without that step's explicit allow, for exactly the arguments shown; taint
+recorded before delivery).
+
 ## I7 — Fail closed
 
 **Statement.** These are dropped or rejected, never passed on:
@@ -200,7 +254,7 @@ e2e: `test_I8_audit_log_verifies_and_detects_tampering`,
 |----|-----------|-----------|
 | I4 | Credential broker: servers receive scoped, short-lived credentials, never your raw secrets | M2 |
 | I5 | Sandbox with a network egress allowlist per server | M2 |
-| I6 | Taint tracking: data from untrusted results cannot flow into sensitive tool calls without approval | M3 |
+| I6 | Taint shared across all servers of one client session, `mcpsum taint reset`, suggested policies at lock time | M3 |
 
 ## Limits
 
@@ -218,7 +272,9 @@ What mcpsum does **not** protect against today:
    egress allowlist) targets this.
 3. **Prompt injection in tool results.** Results are passed through so tools
    keep working. An injected instruction in a web page or an email can still
-   reach the model. I6 targets this; strong defenses need application design
+   reach the model. With a taint policy (I6, opt-in) it cannot silently trigger
+   a sink, but it can still mislead the model's answers, and the protection is
+   only as good as the policy and the user's approval. Strong defenses need application design
    changes ([CaMeL, arXiv:2503.18813](https://arxiv.org/abs/2503.18813);
    [design patterns, arXiv:2506.08837](https://arxiv.org/abs/2506.08837)).
 4. **No sandbox yet.** The server process runs with your user's permissions.
