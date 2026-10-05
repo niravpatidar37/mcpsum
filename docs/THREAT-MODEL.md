@@ -68,7 +68,7 @@ The per-guarantee statements and their tests are in [GUARANTEES.md](GUARANTEES.m
 | 11 | **Terminal injection** via definitions or stderr | Trojan Source, [CVE-2021-42574](https://nvd.nist.gov/vuln/detail/CVE-2021-42574) | All server text escaped before display; stderr relayed escaped and prefixed | **Enforced** |
 | 12 | **Environment secret theft** | — | Scrubbed environment; explicit `--env NAME` passthrough; values never stored | **Enforced** (for env vars only) |
 | 13 | **Malicious code behind unchanged definitions** (postmark-mcp BCC) | [Koi Security](https://www.koi.security/blog/postmark-mcp-npm-malicious-backdoor-email-theft) | Pin the package version in the locked command; audit trail. Sandbox and egress allowlist planned (I5) | **Not prevented** |
-| 14 | **Indirect prompt injection in tool results** | [CaMeL](https://arxiv.org/abs/2503.18813), [design patterns](https://arxiv.org/abs/2506.08837) | Results pass through. With an opt-in taint policy (I6), a sink cannot run after untrusted content without the user's approval (per server in this preview) | **Partly prevented** (opt-in) |
+| 14 | **Indirect prompt injection in tool results** | [CaMeL](https://arxiv.org/abs/2503.18813), [design patterns](https://arxiv.org/abs/2506.08837) | Results pass through. With an opt-in taint policy (I6), a sink cannot run after untrusted content without the user's approval, across all servers of the client session | **Partly prevented** (opt-in) |
 | 15 | **Filesystem / network access outside MCP** | — | None in v0.1 (I5 planned) | **Not prevented** |
 | 16 | **Bypass by configuring the server directly** | — | Out of mcpsum's control; use client allowlists or managed policies | **Not prevented** |
 
@@ -93,8 +93,8 @@ These are the risks that remain, from highest to lowest:
    upgrades. Real fix: I5.
 2. **Indirect injection through results (14).** I6 (opt-in) stops silent
    sink calls after untrusted content; it does not stop the model being misled,
-   it depends on a correct policy, and approval fatigue is real. Sharing taint
-   across servers comes next. Application design that follows the
+   it depends on a correct policy, approval fatigue is real, and an agent
+   with an unmediated shell tool can bypass it. Application design that follows the
    design-patterns paper is still the stronger fix.
 3. **Approval of an already-poisoned definition (1).** Heuristics plus human
    review. A public transparency log of definitions is planned (M5) so that

@@ -78,7 +78,17 @@ Add a `policy` section to a server entry to turn on taint tracking for it:
 
 After a source's result reaches the client, every call to a sink needs your
 approval through mcpsum's prompt, or is refused if your client cannot show one.
-See [I6](GUARANTEES.md#i6--untrusted-results-cannot-silently-trigger-sinks-opt-in-preview).
+This holds across every server of the same client session. See
+[I6](GUARANTEES.md#i6--untrusted-results-cannot-silently-trigger-sinks-opt-in).
+
+To get a starting point, run `mcpsum suggest-policy --name <server>`. It
+labels tools from the server's own annotations, conservatively (a missing hint
+counts as "may reach the outside world" and "may write"), and prints JSON for
+you to review and paste. It never edits the lockfile.
+
+After you have reviewed what a session read, clear it with
+`mcpsum taint list` and `mcpsum taint reset <session>` (or `--all`), from a
+terminal.
 
 Rules:
 

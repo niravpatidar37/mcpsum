@@ -14,6 +14,14 @@ All notable changes are recorded here. The format follows
   explicit allow, or refused with `-32001` when the client cannot show prompts. Policies
   naming unlocked tools are rejected, and `lock` keeps the policy on re-lock. Design:
   `docs/design/0001-taint-tracking.md`.
+- I6 taint is shared by every server of one client session (#16). The session is the MCP
+  client process (or `--session` / `MCPSUM_SESSION`); its marker is written before the
+  untrusted text is delivered, in a per-user directory, and an unreadable marker counts as
+  tainted. Verified with Claude Code 2.1.284: content fetched by one server gated a call on
+  another.
+- `mcpsum taint list` and `mcpsum taint reset` (needs a person at a terminal).
+- `mcpsum suggest-policy`: proposes labels from the server's own annotations, for review.
+- `mcpsum show` prints a server's taint policy.
 
 ## [0.1.1] - 2026-10-03
 
