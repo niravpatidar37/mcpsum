@@ -76,6 +76,32 @@ pub struct Digests {
     pub resource_templates: BTreeMap<String, String>,
 }
 
+/// Policy label: every `resources/read` result is untrusted.
+pub const ALL_RESOURCES: &str = "resources:*";
+/// Policy label: every `prompts/get` result is untrusted.
+pub const ALL_PROMPTS: &str = "prompts:*";
+
+/// User-authored policy for one server (design 0001). Kept outside the
+/// definition digests: it is the user's decision, not something the server
+/// said. Unknown keys are rejected so a typo cannot silently disable it.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ServerPolicy {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub taint: Option<TaintPolicy>,
+}
+
+/// I6 labels. `sources`: results may contain attacker-controlled text.
+/// `sinks`: calls have consequences or can carry data out.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TaintPolicy {
+    #[serde(default)]
+    pub sources: BTreeSet<String>,
+    #[serde(default)]
+    pub sinks: BTreeSet<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServerLock {
@@ -88,6 +114,8 @@ pub struct ServerLock {
     #[serde(flatten)]
     pub surface: Surface,
     pub digests: Digests,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<ServerPolicy>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -271,7 +299,52 @@ impl ServerLock {
             env_passthrough,
             surface,
             digests,
+            policy: None,
         })
+    }
+
+    /// Keep the user's policy across a re-lock. Labels that name a tool which
+    /// no longer exists are dropped (it cannot be called) and returned so the
+    /// CLI can say so; a renamed tool is *not* protected until relabelled.
+    pub fn carry_policy_from(&mut self, old: &ServerLock) -> Vec<String> {
+        let Some(mut policy) = old.policy.clone() else {
+            return Vec::new();
+        };
+        let mut dropped = Vec::new();
+        if let Some(t) = policy.taint.as_mut() {
+            let is_tool = |n: &str| self.surface.find(Kind::Tool, n).is_some();
+            for (field, set, wildcard_ok) in [("sources", &mut t.sources, true), ("sinks", &mut t.sinks, false)] {
+                set.retain(|n| {
+                    let keep = is_tool(n) || (wildcard_ok && (n == ALL_RESOURCES || n == ALL_PROMPTS));
+                    if !keep {
+                        dropped.push(format!("{field}: {n}"));
+                    }
+                    keep
+                });
+            }
+        }
+        self.policy = Some(policy);
+        dropped
+    }
+
+    /// Every label must name something locked. A misspelled tool name would
+    /// leave the real tool unprotected, so it is an error (fail closed).
+    pub fn check_policy(&self) -> Result<()> {
+        let Some(taint) = self.policy.as_ref().and_then(|p| p.taint.as_ref()) else {
+            return Ok(());
+        };
+        let is_tool = |n: &str| self.surface.find(Kind::Tool, n).is_some();
+        for s in &taint.sources {
+            if !(is_tool(s) || s == ALL_RESOURCES || s == ALL_PROMPTS) {
+                bail!("policy.taint.sources: `{s}` is not a locked tool (or `{ALL_RESOURCES}` / `{ALL_PROMPTS}`)");
+            }
+        }
+        for s in &taint.sinks {
+            if !is_tool(s) {
+                bail!("policy.taint.sinks: `{s}` is not a locked tool");
+            }
+        }
+        Ok(())
     }
 
     /// Recompute digests and make sure they match the stored definitions.
@@ -302,6 +375,7 @@ impl LockFile {
         }
         for (name, s) in &lf.servers {
             s.check_integrity().with_context(|| format!("server `{name}`"))?;
+            s.check_policy().with_context(|| format!("server `{name}`"))?;
         }
         Ok(lf)
     }
@@ -448,5 +522,92 @@ pub(crate) mod tests {
             1,
         );
         assert!(LockFile::parse(&tampered).is_err());
+    }
+    fn with_policy(text: &str, policy: serde_json::Value) -> String {
+        let mut v: serde_json::Value = serde_json::from_str(text).unwrap();
+        v["servers"]["demo"]["policy"] = policy;
+        serde_json::to_string(&v).unwrap()
+    }
+
+    fn sample_lockfile_text() -> String {
+        let mut lf = LockFile::new();
+        lf.servers.insert("demo".into(), sample_lock());
+        lf.to_pretty().unwrap()
+    }
+
+    #[test]
+    fn i6_policy_is_parsed_and_sits_outside_the_definition_digests() {
+        let text = with_policy(
+            &sample_lockfile_text(),
+            json!({"taint": {"sources": ["add", "resources:*"], "sinks": ["sub"]}}),
+        );
+        let lf = LockFile::parse(&text).unwrap();
+        let t = lf.servers["demo"].policy.as_ref().unwrap().taint.as_ref().unwrap();
+        assert!(t.sources.contains("add") && t.sources.contains("resources:*"));
+        assert!(t.sinks.contains("sub"));
+        // Editing the policy never invalidates the reviewed definitions, and vice versa.
+        assert_eq!(lf.servers["demo"].digests, sample_lock().digests);
+        let back = LockFile::parse(&lf.to_pretty().unwrap()).unwrap();
+        assert_eq!(back, lf);
+    }
+
+    #[test]
+    fn i6_no_policy_is_not_serialized() {
+        assert!(!sample_lockfile_text().contains("\"policy\""));
+    }
+
+    #[test]
+    fn i6_policy_naming_an_unlocked_tool_is_rejected() {
+        // A typo would silently leave the real tool unprotected: fail closed.
+        for policy in [
+            json!({"taint": {"sources": [], "sinks": ["send_emial"]}}),
+            json!({"taint": {"sources": ["fetch"], "sinks": []}}),
+        ] {
+            let err = LockFile::parse(&with_policy(&sample_lockfile_text(), policy)).unwrap_err();
+            assert!(format!("{err:#}").contains("not a locked tool"), "{err:#}");
+        }
+    }
+
+    #[test]
+    fn i6_only_tools_can_be_sinks() {
+        let err = LockFile::parse(&with_policy(
+            &sample_lockfile_text(),
+            json!({"taint": {"sources": [], "sinks": ["resources:*"]}}),
+        ))
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("not a locked tool"), "{err:#}");
+    }
+
+    #[test]
+    fn i6_misspelled_policy_keys_are_rejected() {
+        for policy in [
+            json!({"taint": {"source": ["add"]}}),
+            json!({"tiant": {"sources": ["add"]}}),
+        ] {
+            assert!(LockFile::parse(&with_policy(&sample_lockfile_text(), policy)).is_err());
+        }
+    }
+    #[test]
+    fn i6_relock_keeps_the_policy_and_reports_labels_for_vanished_tools() {
+        let mut old = sample_lock();
+        old.policy = Some(ServerPolicy {
+            taint: Some(TaintPolicy {
+                sources: ["add".to_string(), ALL_RESOURCES.to_string()].into(),
+                sinks: ["sub".to_string()].into(),
+            }),
+        });
+        let mut s = sample_surface();
+        s.tools.retain(|t| t["name"] != json!("sub"));
+        let mut new = ServerLock::from_surface(vec!["demo-server".into()], vec![], s).unwrap();
+        let dropped = new.carry_policy_from(&old);
+        assert_eq!(dropped, vec!["sinks: sub".to_string()]);
+        let t = new.policy.as_ref().unwrap().taint.as_ref().unwrap();
+        assert!(t.sources.contains("add") && t.sources.contains(ALL_RESOURCES));
+        assert!(t.sinks.is_empty());
+        new.check_policy().unwrap();
+        // No policy before: none after.
+        let mut fresh = sample_lock();
+        assert!(fresh.carry_policy_from(&sample_lock()).is_empty());
+        assert!(fresh.policy.is_none());
     }
 }
