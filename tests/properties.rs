@@ -14,6 +14,11 @@
 //!       valid under the strict locked schema (checked by a hand-written oracle).
 //!   I3  no server-initiated request ever reaches the client; the only
 //!       notification the client ever receives is notifications/progress.
+//!   I6  (with a taint policy) once server text from a source request has
+//!       reached the client, a sink call reaches the server only in the step
+//!       where the user explicitly allowed exactly that call; the taint is
+//!       recorded before the text is delivered; the only requests the client
+//!       ever receives are mcpsum's own approval prompts.
 //!   I7  every response the client receives answers a request it sent and has not
 //!       yet had answered (no spoofed or duplicate responses); after quarantine,
 //!       nothing is ever forwarded to the server again except replies to its pings
@@ -21,12 +26,14 @@
 
 use std::collections::{HashMap, HashSet};
 
-use mcpsum::lock::{ServerLock, Surface};
+use mcpsum::lock::{ServerLock, ServerPolicy, Surface, TaintPolicy, ALL_RESOURCES};
 use mcpsum::monitor::{Action, Monitor, Policy};
 use proptest::prelude::*;
 use serde_json::{json, Value};
 
 const EVIL: &str = "§EVIL§";
+/// Marks benign server-authored result text (for the I6 oracle).
+const SRV: &str = "§SRV§";
 
 fn surface() -> Surface {
     Surface {
@@ -46,6 +53,20 @@ fn surface() -> Surface {
 
 fn lock() -> ServerLock {
     ServerLock::from_surface(vec!["demo".into()], vec![], surface()).unwrap()
+}
+
+/// Same surface with an I6 policy: `noargs` and every resource read are
+/// untrusted sources, `add` is a sink.
+fn policy_lock() -> ServerLock {
+    let mut l = lock();
+    l.policy = Some(ServerPolicy {
+        taint: Some(TaintPolicy {
+            sources: ["noargs".to_string(), ALL_RESOURCES.to_string()].into(),
+            sinks: ["add".to_string()].into(),
+        }),
+    });
+    l.check_policy().unwrap();
+    l
 }
 
 /// Independent oracle for I2: what the *strict* locked schemas allow.
@@ -81,14 +102,36 @@ enum Op {
 #[derive(Debug, Clone)]
 enum ClientOp {
     Initialize,
+    /// Initialize without the elicitation capability (cannot show prompts).
+    InitializeNoPrompt,
+    /// Answer the k-th outstanding approval prompt (or forge one if none).
+    Answer {
+        k: usize,
+        reply: Reply,
+    },
     Initialized,
     List(&'static str),
-    Call { name: String, args: Value },
-    PromptGet { name: String, args: Value },
+    Call {
+        name: String,
+        args: Value,
+    },
+    PromptGet {
+        name: String,
+        args: Value,
+    },
     Read(String),
     Unknown(String),
     Cancel(i64),
     Ping,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Reply {
+    Allow,
+    AllowFalse,
+    Decline,
+    Cancel,
+    Error,
 }
 
 #[derive(Debug, Clone)]
@@ -149,6 +192,9 @@ fn arb_args() -> impl Strategy<Value = Value> {
 fn arb_client() -> impl Strategy<Value = ClientOp> {
     prop_oneof![
         2 => Just(ClientOp::Initialize),
+        1 => Just(ClientOp::InitializeNoPrompt),
+        3 => (0usize..4, prop_oneof![3 => Just(Reply::Allow), 1 => Just(Reply::AllowFalse), 1 => Just(Reply::Decline), 1 => Just(Reply::Cancel), 1 => Just(Reply::Error)])
+            .prop_map(|(k, reply)| ClientOp::Answer { k, reply }),
         2 => Just(ClientOp::Initialized),
         2 => prop_oneof![Just("tools/list"), Just("prompts/list"), Just("resources/list"), Just("resources/templates/list")].prop_map(ClientOp::List),
         6 => (prop_oneof![Just("add".to_string()), Just("noargs".to_string()), Just("exec".to_string()), Just(EVIL.to_string())], arb_args())
@@ -199,6 +245,21 @@ struct Harness {
     server_pending: Vec<(Value, String)>,
     quarantined_seen: bool,
     now: u64,
+    // I6 oracle (only meaningful with `policy_lock`)
+    with_policy: bool,
+    /// client ids of open requests whose results are untrusted sources
+    open_source: HashSet<String>,
+    /// server text from a source request has reached the client
+    oracle_tainted: bool,
+    /// the monitor has emitted `Action::Taint`
+    taint_recorded: bool,
+    /// outstanding approval prompts: prompt id -> (client id, arguments)
+    prompts: Vec<(Value, Value, Value)>,
+    /// the call the user allowed in the current step, if any
+    allowed_now: Option<Value>,
+    /// open sink calls: client id -> arguments (to bind a prompt to its call;
+    /// a call queued during re-verification is prompted for in a later step)
+    open_sink_calls: HashMap<String, (Value, Value)>,
 }
 
 fn key(id: &Value) -> String {
@@ -207,14 +268,29 @@ fn key(id: &Value) -> String {
 
 impl Harness {
     fn new() -> Self {
+        Self::with_lock(lock(), false)
+    }
+
+    fn with_policy() -> Self {
+        Self::with_lock(policy_lock(), true)
+    }
+
+    fn with_lock(l: ServerLock, with_policy: bool) -> Self {
         Self {
-            m: Monitor::new(lock(), Policy::default()),
+            m: Monitor::new(l, Policy::default()),
             next_client_id: 1,
             open: HashMap::new(),
             answered: HashSet::new(),
             server_pending: Vec::new(),
             quarantined_seen: false,
             now: 0,
+            with_policy,
+            open_source: HashSet::new(),
+            oracle_tainted: false,
+            taint_recorded: false,
+            prompts: Vec::new(),
+            allowed_now: None,
+            open_sink_calls: HashMap::new(),
         }
     }
 
@@ -222,6 +298,18 @@ impl Harness {
         let id = json!(self.next_client_id);
         self.next_client_id += 1;
         self.open.insert(key(&id), method.to_string());
+        let is_source = match method {
+            "tools/call" => params["name"] == json!("noargs"),
+            "resources/read" => true,
+            _ => false,
+        };
+        if self.with_policy && is_source {
+            self.open_source.insert(key(&id));
+        }
+        if method == "tools/call" && params["name"] == json!("add") {
+            self.open_sink_calls
+                .insert(key(&id), (id.clone(), params["arguments"].clone()));
+        }
         let msg = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
         self.m.on_client_line(&serde_json::to_vec(&msg).unwrap())
     }
@@ -273,7 +361,7 @@ impl Harness {
                 };
                 json!({field: Self::poisoned_items(m), "nextCursor": EVIL})
             }
-            (Payload::Clean, _) => json!({"content": [{"type": "text", "text": "3"}]}),
+            (Payload::Clean, _) => json!({"content": [{"type": "text", "text": format!("3 {SRV}")}]}),
             (Payload::Poisoned, _) => json!({"content": [{"type": "text", "text": EVIL}], "_meta": EVIL}),
         };
         self.server(json!({"jsonrpc": "2.0", "id": id, "result": result}))
@@ -283,13 +371,43 @@ impl Harness {
         self.m.on_server_line(&serde_json::to_vec(&msg).unwrap())
     }
 
+    fn answer(&mut self, k: usize, reply: Reply) -> Vec<Action> {
+        let eid = if self.prompts.is_empty() {
+            json!(format!("mcpsum-approval-{}", k + 1)) // forged: no such prompt
+        } else {
+            let (eid, _, args) = self.prompts.remove(k % self.prompts.len());
+            if matches!(reply, Reply::Allow) {
+                self.allowed_now = Some(args);
+            }
+            eid
+        };
+        let body = match reply {
+            Reply::Allow => json!({"result": {"action": "accept", "content": {"allow": true}}}),
+            Reply::AllowFalse => json!({"result": {"action": "accept", "content": {"allow": false}}}),
+            Reply::Decline => json!({"result": {"action": "decline"}}),
+            Reply::Cancel => json!({"result": {"action": "cancel"}}),
+            Reply::Error => json!({"error": {"code": -32601, "message": "no"}}),
+        };
+        let mut msg = json!({"jsonrpc": "2.0", "id": eid});
+        for (k, v) in body.as_object().unwrap() {
+            msg[k] = v.clone();
+        }
+        self.m.on_client_line(&serde_json::to_vec(&msg).unwrap())
+    }
+
     fn apply(&mut self, op: &Op) -> Vec<Action> {
+        self.allowed_now = None;
         match op {
             Op::Client(c) => match c {
                 ClientOp::Initialize => self.client_request(
                     "initialize",
                     json!({"protocolVersion": "2025-06-18", "capabilities": {"sampling": {}, "elicitation": {}}, "clientInfo": {"name": "p", "version": "1"}}),
                 ),
+                ClientOp::InitializeNoPrompt => self.client_request(
+                    "initialize",
+                    json!({"protocolVersion": "2025-06-18", "capabilities": {"roots": {}}, "clientInfo": {"name": "p", "version": "1"}}),
+                ),
+                ClientOp::Answer { k, reply } => self.answer(*k, *reply),
                 ClientOp::Initialized => self.m.on_client_line(br#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#),
                 ClientOp::List(m) => self.client_request(m, json!({})),
                 ClientOp::Call { name, args } => {
@@ -329,11 +447,48 @@ impl Harness {
             match a {
                 Action::ToClient(v) => {
                     let text = v.to_string();
-                    // I3: never a server-initiated request.
-                    prop_assert!(
-                        !(v.get("method").is_some() && v.get("id").is_some()),
-                        "request reached client: {text}"
-                    );
+                    // I3: never a server-initiated request. The only request the
+                    // client may receive is mcpsum's own approval prompt (I6).
+                    if v.get("method").is_some() && v.get("id").is_some() {
+                        prop_assert!(self.with_policy, "request reached client: {text}");
+                        prop_assert_eq!(&v["method"], &json!("elicitation/create"), "{}", text);
+                        prop_assert!(
+                            v["id"].as_str().is_some_and(|s| s.starts_with("mcpsum-approval-")),
+                            "{}",
+                            text
+                        );
+                        prop_assert!(
+                            !text.contains(EVIL) && !text.contains(SRV),
+                            "server text in prompt: {}",
+                            text
+                        );
+                        prop_assert!(
+                            self.oracle_tainted || self.taint_recorded,
+                            "prompt without taint: {}",
+                            text
+                        );
+                        let msg = v["params"]["message"].as_str().unwrap_or("");
+                        let bound = self
+                            .open_sink_calls
+                            .values()
+                            .find(|(_, args)| msg.contains(&args.to_string()))
+                            .cloned();
+                        prop_assert!(bound.is_some(), "prompt matches no open sink call: {}", text);
+                        let (cid, args) = bound.unwrap();
+                        self.prompts.push((v["id"].clone(), cid, args));
+                        continue;
+                    }
+                    if v.get("method") == Some(&json!("notifications/cancelled")) {
+                        prop_assert!(self.with_policy, "cancel reached client: {text}");
+                        let rid = v["params"]["requestId"].clone();
+                        prop_assert!(
+                            rid.as_str().is_some_and(|s| s.starts_with("mcpsum-approval-")),
+                            "{}",
+                            text
+                        );
+                        self.prompts.retain(|(eid, _, _)| *eid != rid);
+                        continue;
+                    }
                     if let Some(method) = v.get("method").and_then(Value::as_str) {
                         prop_assert_eq!(method, "notifications/progress", "unexpected notification: {}", text);
                         let mut p = v["params"].clone();
@@ -354,6 +509,18 @@ impl Harness {
                         continue;
                     }
                     let k = key(&id);
+                    self.open_sink_calls.remove(&k);
+                    // I6: server text from a source must be recorded as taint first.
+                    if self.open_source.remove(&k) && (text.contains(SRV) || text.contains(EVIL)) {
+                        prop_assert!(
+                            self.taint_recorded,
+                            "source text delivered before taint was recorded: {}",
+                            text
+                        );
+                        self.oracle_tainted = true;
+                    }
+                    // A held call that is answered (refused) has no prompt left.
+                    self.prompts.retain(|(_, cid, _)| *cid != id);
                     prop_assert!(!self.answered.contains(&k), "duplicate response for {k}: {text}");
                     let method = self.open.remove(&k);
                     prop_assert!(method.is_some(), "response for unknown id {k}: {text}");
@@ -379,12 +546,27 @@ impl Harness {
                             oracle_call_allowed(name, &v["params"]["arguments"]),
                             "oracle rejects forwarded call: {v}"
                         );
+                        // I6: a sink after taint only with this step's explicit allow,
+                        // for exactly the arguments shown, at most once.
+                        if self.with_policy && name == "add" && self.oracle_tainted {
+                            let allowed = self.allowed_now.take();
+                            prop_assert!(allowed.is_some(), "sink forwarded after taint without approval: {v}");
+                            prop_assert_eq!(
+                                &allowed.unwrap(),
+                                &v["params"]["arguments"],
+                                "approved call differs from the forwarded one"
+                            );
+                        }
                     }
                     if is_request {
                         self.server_pending.push((v["id"].clone(), method.to_string()));
                     }
                 }
                 Action::Audit(_) => {}
+                Action::Taint { .. } => {
+                    prop_assert!(self.with_policy, "taint without a policy");
+                    self.taint_recorded = true;
+                }
             }
         }
         if self.m.is_quarantined() {
@@ -411,19 +593,39 @@ proptest! {
     #[test]
     fn invariants_hold_after_clean_handshake(ops in proptest::collection::vec(arb_op(), 1..60)) {
         let mut h = Harness::new();
+        clean_handshake_then(&mut h, &ops)?;
+    }
+
+    /// I6: the same adversarial sessions under a taint policy.
+    #[test]
+    fn i6_taint_invariants_hold_under_a_policy(ops in proptest::collection::vec(arb_op(), 1..60)) {
+        let mut h = Harness::with_policy();
+        clean_handshake_then(&mut h, &ops)?;
+    }
+}
+
+fn clean_handshake_then(h: &mut Harness, ops: &[Op]) -> Result<(), TestCaseError> {
+    {
         let mut script = vec![
             Op::Client(ClientOp::Initialize),
-            Op::Server(ServerOp::Respond { k: 0, payload: Payload::Clean }),
+            Op::Server(ServerOp::Respond {
+                k: 0,
+                payload: Payload::Clean,
+            }),
             Op::Client(ClientOp::Initialized),
         ];
         for _ in 0..4 {
-            script.push(Op::Server(ServerOp::Respond { k: 0, payload: Payload::Clean }));
+            script.push(Op::Server(ServerOp::Respond {
+                k: 0,
+                payload: Payload::Clean,
+            }));
         }
         for op in script.iter().chain(ops.iter()) {
             let actions = h.apply(op);
             h.check(&actions)?;
         }
     }
+    Ok(())
 }
 
 #[test]

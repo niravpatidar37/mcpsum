@@ -70,7 +70,7 @@ fuzz_target!(|data: &[u8]| {
                     assert_eq!(v.get("jsonrpc"), Some(&json!("2.0")));
                     assert!(v.is_object());
                 }
-                Action::Audit(_) => {}
+                Action::Audit(_) | Action::Taint { .. } => {}
             }
         }
     }
