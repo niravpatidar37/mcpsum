@@ -226,3 +226,22 @@ are recorded only as a digest.
 - Per-argument policies (Cedar), for example allow `send_email` to known
   recipients only.
 - An SDK tier for agents that can pass value-level labels to mcpsum.
+
+## 10. Implementation notes (2026-10-04)
+
+Shipped in #33 (monitor, per server) and the follow-up PR (shared state, CLI).
+Differences from the text above, all deliberate:
+
+- The suggestion is a separate command, `mcpsum suggest-policy`, so it also
+  works on existing lockfiles. Its rule: source if `openWorldHint` is not
+  `false`; sink if `readOnlyHint` is not `true` **or** the tool is open-world
+  (a fetched URL can carry data out).
+- `mcpsum taint reset` requires a terminal on stdin and stderr plus a typed
+  confirmation. An agent with an unmediated shell tool can still delete the
+  marker file; that agent already has an unmediated sink, so this is defence
+  in depth only, and the limit is documented in GUARANTEES.
+- Markers are named `<session>.taint`; the source is recorded as
+  `<server>:<label>`.
+- Claude Code 2.1.284 starts all proxies from one process (one session) and
+  answers mcpsum's prompt with `cancel` in non-interactive `-p` mode, so the
+  sink is refused there.

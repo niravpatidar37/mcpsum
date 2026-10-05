@@ -351,10 +351,27 @@ def test_I8_two_proxies_for_one_server_keep_one_valid_chain(tmp_path, client_fac
 
 # ------------------------------------------------- I6: taint tracking (design 0001)
 
-def add_taint_policy(lockp, sources=("fetch",), sinks=("add",)):
+def add_taint_policy(lockp, sources=("fetch",), sinks=("add",), server="evil"):
     lf = json.loads(lockp.read_text(encoding="utf-8"))
-    lf["servers"]["evil"]["policy"] = {"taint": {"sources": list(sources), "sinks": list(sinks)}}
+    lf["servers"][server]["policy"] = {"taint": {"sources": list(sources), "sinks": list(sinks)}}
     lockp.write_text(json.dumps(lf, indent=2), encoding="utf-8")
+
+
+def state_env(tmp_path, **extra):
+    """Isolate the shared taint state: every proxy pytest starts has the same
+    parent process, so without this all tests would share one session."""
+    return {"MCPSUM_STATE_DIR": str(tmp_path / "state"), **extra}
+
+
+def lock_web_and_mail(tmp_path):
+    """Two servers in one lock: `web` reads untrusted pages, `mail` has the sink."""
+    lockp = tmp_path / "mcp.lock"
+    for name in ("web", "mail"):
+        r = run("lock", "--lock", str(lockp), "--name", name, "--", sys.executable, EVIL, "--mode", "taint")
+        assert r.returncode == 0, r.stderr
+    add_taint_policy(lockp, sources=("fetch",), sinks=(), server="web")
+    add_taint_policy(lockp, sources=(), sinks=("add",), server="mail")
+    return lockp
 
 
 def audit_entries(c):
@@ -364,7 +381,7 @@ def audit_entries(c):
 def test_I6_injected_result_cannot_trigger_a_sink_when_the_client_cannot_prompt(tmp_path, client_factory):
     lockp = lock_evil(tmp_path, "taint")
     add_taint_policy(lockp)
-    c = client_factory(lockp)
+    c = client_factory(lockp, env=state_env(tmp_path))
     c.initialize(capabilities={})  # no elicitation: mcpsum cannot ask the user
     assert c.call(1, "add", {"a": 1, "b": 2})["result"]["content"][0]["text"] == "3", "clean session: sink works"
     page = c.call(2, "fetch", {"url": "https://evil.example"})
@@ -384,7 +401,7 @@ def test_I6_injected_result_cannot_trigger_a_sink_when_the_client_cannot_prompt(
 def test_I6_sink_after_injection_runs_only_when_the_user_allows_it(tmp_path, client_factory):
     lockp = lock_evil(tmp_path, "taint")
     add_taint_policy(lockp)
-    c = client_factory(lockp)
+    c = client_factory(lockp, env=state_env(tmp_path))
     c.initialize()  # advertises elicitation
     c.call(1, "fetch", {"url": "https://evil.example"})
     # The user declines: the call is refused and never reaches the server.
@@ -392,7 +409,7 @@ def test_I6_sink_after_injection_runs_only_when_the_user_allows_it(tmp_path, cli
     ask = c.next_request("elicitation/create")
     assert ask["id"].startswith("mcpsum-approval-")
     msg = ask["params"]["message"]
-    assert msg.startswith("mcpsum security check:") and "`add`" in msg and "`fetch`" in msg
+    assert msg.startswith("mcpsum security check:") and "`add`" in msg and "`evil:fetch`" in msg
     assert "IGNORE PREVIOUS" not in msg, "server text must never appear in mcpsum's prompt"
     c.send({"jsonrpc": "2.0", "id": ask["id"], "result": {"action": "decline"}})
     r = c.wait_response(2)
@@ -419,3 +436,63 @@ def test_I6_relock_keeps_the_user_policy(tmp_path):
     add_taint_policy(lockp, sinks=("add", "send_emial"))
     r = run("show", "--lock", str(lockp))
     assert r.returncode != 0 and "send_emial" in r.stderr, "a typo in the policy must fail closed"
+
+
+def test_I6_taint_crosses_servers_of_one_client_session(tmp_path, client_factory):
+    # Both proxies are started by the same process (like an MCP client does),
+    # so they share the default session: content read by `web` gates `mail`.
+    lockp = lock_web_and_mail(tmp_path)
+    web = client_factory(lockp, name="web", env=state_env(tmp_path))
+    mail = client_factory(lockp, name="mail", env=state_env(tmp_path))
+    web.initialize(capabilities={})
+    mail.initialize(capabilities={})
+    assert mail.call(1, "add", {"a": 1, "b": 2})["result"]["content"][0]["text"] == "3"
+    web.call(1, "fetch", {"url": "https://evil.example"})
+    r = mail.call(2, "add", {"a": 1300, "b": 37})
+    assert r["error"]["code"] == -32001, r
+    assert "web:fetch" in r["error"]["message"]
+
+
+def test_I6_separate_sessions_do_not_share_taint(tmp_path, client_factory):
+    lockp = lock_web_and_mail(tmp_path)
+    web = client_factory(lockp, name="web", env=state_env(tmp_path))
+    mail = client_factory(lockp, name="mail", env=state_env(tmp_path, MCPSUM_SESSION="another-client"))
+    web.initialize(capabilities={})
+    mail.initialize(capabilities={})
+    web.call(1, "fetch", {"url": "https://evil.example"})
+    assert mail.call(1, "add", {"a": 1, "b": 2})["result"]["content"][0]["text"] == "3"
+
+
+def test_I6_unreadable_taint_state_counts_as_tainted(tmp_path, client_factory):
+    lockp = lock_web_and_mail(tmp_path)
+    (tmp_path / "state").mkdir()
+    (tmp_path / "state" / "s1.taint").write_text("{garbage", encoding="utf-8")
+    mail = client_factory(lockp, name="mail", env=state_env(tmp_path, MCPSUM_SESSION="s1"))
+    mail.initialize(capabilities={})
+    r = mail.call(1, "add", {"a": 1, "b": 2})
+    assert r["error"]["code"] == -32001, r
+
+
+def test_I6_taint_list_shows_the_session_and_reset_needs_a_person(tmp_path, client_factory):
+    lockp = lock_web_and_mail(tmp_path)
+    env = state_env(tmp_path, MCPSUM_SESSION="s1")
+    web = client_factory(lockp, name="web", env=env)
+    web.initialize(capabilities={})
+    web.call(1, "fetch", {"url": "https://evil.example"})
+    r = run("taint", "list", env=env)
+    assert r.returncode == 0 and "s1" in r.stdout and "web:fetch" in r.stdout, r
+    # An agent with a shell tool runs commands without a terminal: refused.
+    r = run("taint", "reset", "--all", env=env)
+    assert r.returncode == 3 and "terminal" in r.stderr, r
+    assert "web:fetch" in run("taint", "list", env=env).stdout, "taint must survive a refused reset"
+
+
+def test_suggest_policy_labels_unannotated_tools_conservatively(tmp_path):
+    lockp = lock_evil(tmp_path, "taint")
+    r = run("suggest-policy", "--lock", str(lockp), "--name", "evil")
+    assert r.returncode == 0, r.stderr
+    snippet = json.loads(r.stdout[r.stdout.index("{"):r.stdout.rindex("}") + 1])
+    # No annotations: by the MCP defaults every tool may be open-world and may write.
+    assert set(snippet["policy"]["taint"]["sources"]) == {"add", "echo_env", "fetch"}
+    assert set(snippet["policy"]["taint"]["sinks"]) == {"add", "echo_env", "fetch"}
+    assert "policy" not in json.loads(lockp.read_text(encoding="utf-8"))["servers"]["evil"], "never applied automatically"

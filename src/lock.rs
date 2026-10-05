@@ -81,6 +81,38 @@ pub const ALL_RESOURCES: &str = "resources:*";
 /// Policy label: every `prompts/get` result is untrusted.
 pub const ALL_PROMPTS: &str = "prompts:*";
 
+/// A *suggested* taint policy from the server's own annotations, for the user
+/// to review. Annotations are claims made by the server (the MCP specification
+/// says not to base decisions on them), so this is never applied
+/// automatically. Missing hints take the MCP defaults (`readOnlyHint: false`,
+/// `openWorldHint: true`), which makes unannotated tools both source and sink.
+pub fn suggest_taint_policy(s: &Surface) -> TaintPolicy {
+    let mut p = TaintPolicy::default();
+    for tool in &s.tools {
+        let Some(name) = tool.get("name").and_then(Value::as_str) else {
+            continue;
+        };
+        let hint = |k: &str| tool.get("annotations").and_then(|a| a.get(k)).and_then(Value::as_bool);
+        let read_only = hint("readOnlyHint") == Some(true);
+        let open_world = hint("openWorldHint") != Some(false);
+        if open_world {
+            p.sources.insert(name.to_string());
+        }
+        // An open-world tool's arguments leave the machine (a fetched URL can
+        // carry data out), so it is a sink even when it is read-only.
+        if !read_only || open_world {
+            p.sinks.insert(name.to_string());
+        }
+    }
+    if !s.resources.is_empty() || !s.resource_templates.is_empty() {
+        p.sources.insert(ALL_RESOURCES.to_string());
+    }
+    if !s.prompts.is_empty() {
+        p.sources.insert(ALL_PROMPTS.to_string());
+    }
+    p
+}
+
 /// User-authored policy for one server (design 0001). Kept outside the
 /// definition digests: it is the user's decision, not something the server
 /// said. Unknown keys are rejected so a typo cannot silently disable it.
@@ -609,5 +641,22 @@ pub(crate) mod tests {
         let mut fresh = sample_lock();
         assert!(fresh.carry_policy_from(&sample_lock()).is_empty());
         assert!(fresh.policy.is_none());
+    }
+    #[test]
+    fn i6_suggested_policy_follows_annotation_defaults_conservatively() {
+        let mut s = sample_surface();
+        s.tools = vec![
+            json!({"name": "get_time", "inputSchema": {"type": "object"}, "annotations": {"readOnlyHint": true, "openWorldHint": false}}),
+            json!({"name": "fetch", "inputSchema": {"type": "object"}, "annotations": {"readOnlyHint": true, "openWorldHint": true}}),
+            json!({"name": "write_file", "inputSchema": {"type": "object"}, "annotations": {"readOnlyHint": false, "openWorldHint": false}}),
+            json!({"name": "mystery", "inputSchema": {"type": "object"}}),
+        ];
+        s.resources = vec![json!({"uri": "file:///a", "name": "a"})];
+        let p = suggest_taint_policy(&s);
+        let set = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<BTreeSet<_>>();
+        // Closed-world read-only: neither. Open world: both (a URL can carry data
+        // out). Writes: sink. No annotations: both (MCP defaults).
+        assert_eq!(p.sources, set(&["fetch", "mystery", ALL_RESOURCES]));
+        assert_eq!(p.sinks, set(&["fetch", "mystery", "write_file"]));
     }
 }

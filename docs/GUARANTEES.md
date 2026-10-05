@@ -117,7 +117,7 @@ cannot use them.
 e2e: `test_I3_server_initiated_requests_never_reach_client`,
 `test_I3_modern_discover_is_denied_by_default`. Property: invariant I3.
 
-## I6 — Untrusted results cannot silently trigger sinks (opt-in, preview)
+## I6 — Untrusted results cannot silently trigger sinks (opt-in)
 
 **Statement.** If the server's entry in `mcp.lock` has a `policy.taint` section
 (see [LOCKFILE.md](LOCKFILE.md#policy-optional-i6)), then once a result from a
@@ -134,8 +134,12 @@ forwarded silently:
 
 The session is marked tainted **before** the untrusted text is delivered
 (write-ahead), including error messages and progress messages from a source.
-Only the user clears the taint; in this preview that means restarting the client
-session. Labels come only from the user's policy, never from server-written
+The taint is **shared by every server of one client session**: content fetched
+by `web` gates `send_email` on `mail`. The session is the MCP client process that
+started the proxies (override with `--session` or `MCPSUM_SESSION`), and its marker
+lives in a per-user directory (owner-only on Unix). A marker that cannot be read
+counts as tainted. Only the user clears it, with `mcpsum taint reset`, which
+refuses to run without a person at a terminal. Labels come only from the user's policy, never from server-written
 annotations (the MCP specification says not to trust those). A label that names
 a tool which isn't locked is an error, so a typo cannot silently leave a tool
 unprotected. Without a policy, behaviour is exactly as before.
@@ -147,13 +151,25 @@ the model, instead of trying to detect injected text
 [design patterns](https://arxiv.org/abs/2506.08837)). Design and alternatives:
 [design 0001](design/0001-taint-tracking.md).
 
-**Preview limits.** The taint is tracked **per server** (per proxy). That covers
-flows inside one server, such as the GitHub MCP exploit where a malicious public
-issue led the agent to leak private repositories through the same server
-([Invariant Labs](https://invariantlabs.ai/blog/mcp-github-vulnerability)).
-Sharing taint across all servers of one client session, and `mcpsum taint reset`,
-come next (#16). The guarantee is coarse (every sink after any source needs
-approval) and only as good as the user's decision.
+This covers flows inside one server, such as the GitHub MCP exploit where a
+malicious public issue led the agent to leak private repositories through the
+same server ([Invariant Labs](https://invariantlabs.ai/blog/mcp-github-vulnerability)),
+and flows across servers. `mcpsum suggest-policy` proposes labels from the
+server's annotations for you to review.
+
+**Limits.**
+
+- Coarse: after any source, every sink needs approval until you reset.
+- Only as good as the policy and your decision (approval fatigue is real).
+- **An agent with a shell tool that is not behind mcpsum can bypass it**: the
+  shell is itself an unmediated sink (it can send data with `curl`, or delete
+  the marker file). The terminal check on `taint reset` is defence in depth,
+  not a boundary.
+- Session grouping follows the process tree. VS Code starts servers from two
+  processes, which form two sessions; use `--session` to join them. A reused
+  process id makes a new session start tainted (fail safe).
+- Integrity only: reading private data and sending it out *without* any
+  injection is not covered yet (confidentiality labels, design 0001 §9).
 
 **Tests.** `i6_source_result_taints_the_session_before_it_reaches_the_client`,
 `i6_tainted_sink_is_held_and_forwarded_exactly_once_on_explicit_allow`,
@@ -163,10 +179,16 @@ approval) and only as good as the user's decision.
 `i6_unanswered_approval_times_out_denies_and_withdraws_the_prompt`,
 `i6_quarantine_denies_held_calls`,
 `i6_progress_text_from_a_source_taints_before_it_is_delivered`,
-`i6_policy_naming_an_unlocked_tool_is_rejected` and the other `i6_*` unit tests.
+`i6_policy_naming_an_unlocked_tool_is_rejected`,
+`i6_marker_is_shared_by_every_store_of_a_session_and_cleared_only_by_reset`,
+`i6_session_ids_cannot_escape_the_state_directory` and the other `i6_*` unit tests.
 e2e: `test_I6_injected_result_cannot_trigger_a_sink_when_the_client_cannot_prompt`,
 `test_I6_sink_after_injection_runs_only_when_the_user_allows_it`,
-`test_I6_relock_keeps_the_user_policy`.
+`test_I6_relock_keeps_the_user_policy`,
+`test_I6_taint_crosses_servers_of_one_client_session`,
+`test_I6_separate_sessions_do_not_share_taint`,
+`test_I6_unreadable_taint_state_counts_as_tainted`,
+`test_I6_taint_list_shows_the_session_and_reset_needs_a_person`.
 Property: `i6_taint_invariants_hold_under_a_policy` (no sink after taint
 without that step's explicit allow, for exactly the arguments shown; taint
 recorded before delivery).
@@ -254,7 +276,7 @@ e2e: `test_I8_audit_log_verifies_and_detects_tampering`,
 |----|-----------|-----------|
 | I4 | Credential broker: servers receive scoped, short-lived credentials, never your raw secrets | M2 |
 | I5 | Sandbox with a network egress allowlist per server | M2 |
-| I6 | Taint shared across all servers of one client session, `mcpsum taint reset`, suggested policies at lock time | M3 |
+| I6+ | Confidentiality labels (private data cannot reach public sinks) and per-argument rules | M3 |
 
 ## Limits
 
@@ -273,8 +295,9 @@ What mcpsum does **not** protect against today:
 3. **Prompt injection in tool results.** Results are passed through so tools
    keep working. An injected instruction in a web page or an email can still
    reach the model. With a taint policy (I6, opt-in) it cannot silently trigger
-   a sink, but it can still mislead the model's answers, and the protection is
-   only as good as the policy and the user's approval. Strong defenses need application design
+   a sink, but it can still mislead the model's answers, the protection is
+   only as good as the policy and the user's approval, and an agent with its
+   own shell tool can bypass it. Strong defenses need application design
    changes ([CaMeL, arXiv:2503.18813](https://arxiv.org/abs/2503.18813);
    [design patterns, arXiv:2506.08837](https://arxiv.org/abs/2506.08837)).
 4. **No sandbox yet.** The server process runs with your user's permissions.

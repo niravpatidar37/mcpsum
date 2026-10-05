@@ -33,7 +33,7 @@ sha2 = "0.11.0"
 nix = { version = "0.31", default-features = false, features = ["fs"] }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_IO"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_ToolHelp", "Win32_System_IO"] }
 
 [dev-dependencies]
 proptest = "1.11.0"
