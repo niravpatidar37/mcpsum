@@ -6,13 +6,14 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 
 use mcpsum::audit::verify_chain;
-use mcpsum::lock::{Change, LockFile, ServerLock};
+use mcpsum::lock::{suggest_taint_policy, Change, LockFile, ServerLock};
 use mcpsum::monitor::Policy;
 use mcpsum::probe::{probe, ProbeOptions};
 use mcpsum::process::validate_env_names;
 use mcpsum::proxy::run_proxy;
 use mcpsum::render::escape_untrusted;
 use mcpsum::report::{findings, render_changes};
+use mcpsum::taint;
 
 /// Exit codes are part of the CLI contract (CI depends on them).
 const EXIT_OK: u8 = 0;
@@ -77,6 +78,10 @@ enum Cmd {
         /// Audit log path (default: <lock dir>/.mcpsum-audit/<name>.jsonl).
         #[arg(long)]
         audit: Option<PathBuf>,
+        /// Taint session shared with other proxies (default: the MCP client's
+        /// process id; also MCPSUM_SESSION). Only used with a taint policy.
+        #[arg(long)]
+        session: Option<String>,
     },
     /// Print the locked definitions with hidden characters made visible.
     Show {
@@ -87,6 +92,36 @@ enum Cmd {
     },
     /// Verify the hash chain of an audit log.
     AuditVerify { path: PathBuf },
+    /// Print a suggested taint policy (I6) for a locked server, from its own
+    /// annotations. Review it, then paste it into the server's entry; it is
+    /// never applied automatically.
+    SuggestPolicy {
+        #[arg(long, default_value = "mcp.lock")]
+        lock: PathBuf,
+        #[arg(long)]
+        name: String,
+    },
+    /// Inspect or reset tainted client sessions (I6).
+    Taint {
+        #[command(subcommand)]
+        cmd: TaintCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum TaintCmd {
+    /// List sessions that have read untrusted content.
+    List,
+    /// Clear a session's taint after you have reviewed it. Needs a person at a
+    /// terminal, so an agent with a shell tool cannot clear its own taint.
+    Reset {
+        /// Session id (from `mcpsum taint list`).
+        #[arg(required_unless_present = "all", conflicts_with = "all")]
+        session: Option<String>,
+        /// Reset every session.
+        #[arg(long)]
+        all: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -106,11 +141,23 @@ fn main() -> ExitCode {
             timeout_secs,
             strict,
         } => cmd_verify(&lock, name.as_deref(), timeout_secs, strict),
-        Cmd::Proxy { lock, name, audit } => {
-            run_proxy(&lock, &name, audit, Policy::default()).map(|c| if c == 0 { EXIT_OK } else { EXIT_DRIFT })
+        Cmd::Proxy {
+            lock,
+            name,
+            audit,
+            session,
+        } => {
+            let session = session.or_else(|| std::env::var("MCPSUM_SESSION").ok().filter(|s| !s.is_empty()));
+            run_proxy(&lock, &name, audit, session, Policy::default())
+                .map(|c| if c == 0 { EXIT_OK } else { EXIT_DRIFT })
         }
         Cmd::Show { lock, name } => cmd_show(&lock, name.as_deref()),
         Cmd::AuditVerify { path } => cmd_audit_verify(&path),
+        Cmd::SuggestPolicy { lock, name } => cmd_suggest_policy(&lock, &name),
+        Cmd::Taint { cmd } => match cmd {
+            TaintCmd::List => cmd_taint_list(),
+            TaintCmd::Reset { session, all } => cmd_taint_reset(session.as_deref(), all),
+        },
     };
     match result {
         Ok(code) => ExitCode::from(code),
@@ -270,6 +317,16 @@ fn cmd_show(lock: &Path, name: Option<&str>) -> Result<u8> {
             let d = t.get("description").and_then(|v| v.as_str()).unwrap_or("");
             println!("  tool {}: {}", escape_untrusted(tn), escape_untrusted(d));
         }
+        if let Some(tp) = entry.policy.as_ref().and_then(|p| p.taint.as_ref()) {
+            let join = |s: &std::collections::BTreeSet<String>| {
+                s.iter().map(|x| escape_untrusted(x)).collect::<Vec<_>>().join(", ")
+            };
+            println!(
+                "  taint policy: sources [{}], sinks [{}]",
+                join(&tp.sources),
+                join(&tp.sinks)
+            );
+        }
         for f in findings(&entry.surface, &[]) {
             println!("  ! {f}");
         }
@@ -289,4 +346,80 @@ fn cmd_audit_verify(path: &Path) -> Result<u8> {
             Ok(EXIT_DRIFT)
         }
     }
+}
+
+fn cmd_suggest_policy(lock: &Path, name: &str) -> Result<u8> {
+    let lf = LockFile::load(lock)?;
+    let entry = lf.server(name)?;
+    let snippet = serde_json::json!({"policy": {"taint": suggest_taint_policy(&entry.surface)}});
+    println!(
+        "Suggested taint policy for `{}`, from the server's own annotations.",
+        escape_untrusted(name)
+    );
+    println!("Annotations are claims made by the server: check every label, then paste");
+    println!(
+        "this into the server's entry in {}. mcpsum never applies it on its own.\n",
+        lock.display()
+    );
+    // Tool names are server-written: escape each line for the terminal.
+    for line in serde_json::to_string_pretty(&snippet)?.lines() {
+        println!("{}", escape_untrusted(line));
+    }
+    Ok(EXIT_OK)
+}
+
+fn cmd_taint_list() -> Result<u8> {
+    let dir = taint::default_state_dir()?;
+    let sessions = taint::list(&dir)?;
+    if sessions.is_empty() {
+        println!("no tainted sessions ({})", dir.display());
+    }
+    for (session, m) in sessions {
+        match m {
+            Ok(m) => println!(
+                "{session}  tainted by {}  at {} (unix ms)",
+                escape_untrusted(&m.source),
+                m.at_ms
+            ),
+            Err(e) => println!("{session}  UNREADABLE (treated as tainted): {}", escape_untrusted(&e)),
+        }
+    }
+    Ok(EXIT_OK)
+}
+
+fn cmd_taint_reset(session: Option<&str>, all: bool) -> Result<u8> {
+    use std::io::{BufRead, IsTerminal};
+    // Defence in depth: an agent with a shell tool usually has no terminal.
+    // (It could still delete the marker file itself; see GUARANTEES I6.)
+    if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
+        bail!("refusing: `taint reset` must be run by a person in a terminal");
+    }
+    let dir = taint::default_state_dir()?;
+    let targets: Vec<String> = if all {
+        taint::list(&dir)?.into_iter().map(|(s, _)| s).collect()
+    } else {
+        vec![session.unwrap_or_default().to_string()]
+    };
+    if targets.is_empty() {
+        println!("no tainted sessions");
+        return Ok(EXIT_OK);
+    }
+    eprintln!(
+        "Reset taint for {}? Only do this if you have reviewed what the agent read. Type `reset` to confirm:",
+        targets.join(", ")
+    );
+    let mut answer = String::new();
+    std::io::stdin().lock().read_line(&mut answer)?;
+    if answer.trim() != "reset" {
+        println!("not reset");
+        return Ok(EXIT_ERROR);
+    }
+    for s in targets {
+        if taint::clear(&dir, &s)? {
+            println!("reset {s}");
+        } else {
+            println!("{s} was not tainted");
+        }
+    }
+    Ok(EXIT_OK)
 }

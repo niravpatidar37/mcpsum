@@ -22,6 +22,7 @@ use crate::lock::LockFile;
 use crate::monitor::{Action, AuditEvent, Decision, Dir, Monitor, Policy};
 use crate::process::{relay_stderr, spawn_server};
 use crate::render::escape_untrusted;
+use crate::taint::{default_session, default_state_dir, TaintStore};
 
 enum Event {
     Client(Frame),
@@ -60,9 +61,39 @@ fn write_line(w: &mut impl Write, v: &Value) -> std::io::Result<()> {
     w.flush()
 }
 
-pub fn run_proxy(lock_path: &Path, name: &str, audit_path: Option<PathBuf>, policy: Policy) -> Result<i32> {
+/// Taint shared by every proxy of one client session (I6, design 0001 §4.4).
+/// Only servers with a taint policy use it, so nothing changes without one.
+fn open_taint_store(has_policy: bool, session: Option<String>) -> Result<Option<TaintStore>> {
+    if !has_policy {
+        return Ok(None);
+    }
+    let session = match session {
+        Some(s) => s,
+        None => default_session()?,
+    };
+    Ok(Some(TaintStore::open(&default_state_dir()?, &session)?))
+}
+
+/// What the shared state says. A marker that cannot be read counts as
+/// tainted: more prompts, never fewer.
+fn shared_taint(store: &TaintStore) -> Option<String> {
+    match store.read() {
+        Ok(s) => s,
+        Err(_) => Some("unknown (taint state unreadable)".into()),
+    }
+}
+
+pub fn run_proxy(
+    lock_path: &Path,
+    name: &str,
+    audit_path: Option<PathBuf>,
+    session: Option<String>,
+    policy: Policy,
+) -> Result<i32> {
     let lockfile = LockFile::load(lock_path)?;
     let server = lockfile.server(name)?.clone();
+    let has_taint_policy = server.policy.as_ref().is_some_and(|p| p.taint.is_some());
+    let taint_store = open_taint_store(has_taint_policy, session)?;
     let audit_path = audit_path.unwrap_or_else(|| default_audit_path(lock_path, name));
     let mut audit = open_audit(&audit_path, name)?;
     let max = policy.max_line_bytes;
@@ -102,6 +133,11 @@ pub fn run_proxy(lock_path: &Path, name: &str, audit_path: Option<PathBuf>, poli
     // never left running (an early `?` would skip the kill).
     let mut fatal: Option<anyhow::Error> = None;
     'events: for ev in rx {
+        // Another proxy of this session may have read untrusted content, or
+        // the user may have reset the session: sync before every decision.
+        if let Some(store) = &taint_store {
+            monitor.set_taint(shared_taint(store));
+        }
         let actions = match ev {
             Event::Client(Frame::Line(l)) => monitor.on_client_line(&l),
             Event::Client(Frame::TooLong) => monitor.client_oversize(),
@@ -164,9 +200,17 @@ pub fn run_proxy(lock_path: &Path, name: &str, audit_path: Option<PathBuf>, poli
                     }
                 }
                 Action::Audit(_) => {} // already written ahead
-                // Taint lives in the monitor for now; sharing it across the
-                // proxies of one client session is design 0001, step 3.
-                Action::Taint { .. } => {}
+                // Write-ahead: `Taint` precedes the untrusted text in this
+                // batch, so the marker exists before the client sees it. If it
+                // cannot be recorded, stop before delivering anything.
+                Action::Taint { source } => {
+                    if let Some(store) = &taint_store {
+                        if let Err(e) = store.mark(&format!("{name}:{source}")) {
+                            fatal = Some(e.context("recording taint (I6); failing closed"));
+                            break 'events;
+                        }
+                    }
+                }
             }
         }
     }
