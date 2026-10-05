@@ -1,6 +1,6 @@
 # Design 0001: Taint tracking (I6)
 
-- **Status:** proposed
+- **Status:** accepted (owner decisions, 2026-10-03: prompt via elicitation else block; opt-in policy; taint cleared only by `mcpsum taint reset`)
 - **Issue:** #16 (milestone M3)
 - **Author:** mcpsum maintainers
 - **Date:** 2026-10-03
