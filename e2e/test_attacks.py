@@ -496,3 +496,91 @@ def test_suggest_policy_labels_unannotated_tools_conservatively(tmp_path):
     assert set(snippet["policy"]["taint"]["sources"]) == {"add", "echo_env", "fetch"}
     assert set(snippet["policy"]["taint"]["sinks"]) == {"add", "echo_env", "fetch"}
     assert "policy" not in json.loads(lockp.read_text(encoding="utf-8"))["servers"]["evil"], "never applied automatically"
+
+
+# ------------------------------------------------- I5: sandbox (design 0002)
+
+linux_only = pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Landlock/seccomp backend is Linux-only")
+
+
+def add_sandbox_policy(lockp, sandbox, server="evil"):
+    lf = json.loads(lockp.read_text(encoding="utf-8"))
+    lf["servers"][server]["policy"] = {"sandbox": sandbox}
+    lockp.write_text(json.dumps(lf, indent=2), encoding="utf-8")
+
+
+def escape_attempts(tmp_path, client_factory, sandbox):
+    """Run the probe tool with a fake HOME holding a planted key; return its report."""
+    import secrets
+    import socket
+    home = tmp_path / "home"
+    (home / ".ssh").mkdir(parents=True)
+    canary = "KEY-" + secrets.token_hex(8)
+    (home / ".ssh" / "id_rsa").write_text(canary, encoding="utf-8")
+    lockp = lock_evil(tmp_path, "sandbox-probe")
+    if sandbox is not None:
+        add_sandbox_policy(lockp, sandbox)
+    lock_before = lockp.read_text(encoding="utf-8")
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    port = listener.getsockname()[1]
+    c = client_factory(lockp, env={"HOME": str(home)})
+    c.initialize()
+    r = c.call(1, "try_escape", {"lock": str(lockp), "audit": str(c.audit), "port": port})
+    listener.close()
+    report = json.loads(r["result"]["content"][0]["text"])
+    return report, canary, lockp, lock_before, c
+
+
+@linux_only
+def test_I5_without_a_sandbox_the_probe_succeeds(tmp_path, client_factory):
+    # Control: proves the probe really can do all of this when unconfined.
+    report, canary, *_ = escape_attempts(tmp_path, client_factory, sandbox=None)
+    for k in ("read_secret", "write_bashrc", "write_lock", "connect", "udp_send", "tmp_write", "exec"):
+        assert report[k].startswith("ok"), (k, report)
+    assert canary in report["read_secret"]
+
+
+@linux_only
+def test_I5_sandboxed_server_cannot_read_secrets_touch_mcpsum_files_or_reach_the_network(tmp_path, client_factory):
+    report, canary, lockp, lock_before, c = escape_attempts(
+        tmp_path, client_factory, sandbox={"filesystem": {}, "network": {"allow": []}})
+    for k in ("read_secret", "write_bashrc", "write_lock", "write_audit", "connect", "udp_send", "userns"):
+        assert report[k].startswith("denied"), (k, report)
+    # It still works: its own temp dir and running programs are allowed.
+    assert report["tmp_write"].startswith("ok") and report["exec"].startswith("ok"), report
+    assert canary not in c.everything_received()
+    assert lockp.read_text(encoding="utf-8") == lock_before
+    assert not (tmp_path / "home" / ".bashrc").exists()
+    c.close()
+    assert "I5 sandbox" in c.audit.read_text(encoding="utf-8")
+    assert run("audit-verify", str(c.audit)).returncode == 0
+
+
+@linux_only
+def test_I5_policy_that_would_expose_mcpsum_files_is_refused(tmp_path):
+    lockp = lock_evil(tmp_path, "sandbox-probe")
+    add_sandbox_policy(lockp, {"filesystem": {"write": [str(tmp_path)]}})
+    r = run("verify", "--lock", str(lockp))
+    assert r.returncode == 3 and "would let the server modify" in r.stderr, r
+    add_sandbox_policy(lockp, {"filesystem": {"read": ["/definitely/not/here"]}})
+    r = run("verify", "--lock", str(lockp))
+    assert r.returncode == 3 and "does not exist" in r.stderr, r
+
+
+@linux_only
+def test_I5_relock_and_verify_run_the_server_inside_its_sandbox(tmp_path):
+    lockp = lock_evil(tmp_path, "sandbox-probe")
+    add_sandbox_policy(lockp, {"network": {"allow": []}})
+    assert run("verify", "--lock", str(lockp)).returncode == 0
+    lock_evil(tmp_path, "sandbox-probe")  # re-lock keeps the policy
+    assert "sandbox" in json.loads(lockp.read_text(encoding="utf-8"))["servers"]["evil"]["policy"]
+
+
+@pytest.mark.skipif(sys.platform.startswith("linux"), reason="checks the refusal on platforms without a backend")
+def test_I5_sandboxed_server_does_not_start_without_a_backend(tmp_path):
+    lockp = lock_evil(tmp_path, "sandbox-probe")
+    add_sandbox_policy(lockp, {"network": {"allow": []}})
+    r = run("verify", "--lock", str(lockp))
+    assert r.returncode == 3 and "will not start" in r.stderr, r
