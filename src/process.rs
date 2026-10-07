@@ -20,6 +20,7 @@ use process_wrap::std::{ChildWrapper, CommandWrap};
 
 use crate::framing::{BoundedLines, Frame};
 use crate::render::escape_untrusted;
+use crate::sandbox::SandboxSpec;
 
 use anyhow::{bail, Context, Result};
 
@@ -182,13 +183,34 @@ impl Drop for ServerProcess {
 /// server-authored text, so it is relayed through [`relay_stderr`] rather than
 /// inherited (raw bytes could carry terminal escape sequences that hide or
 /// forge mcpsum's own output).
-pub fn spawn_server(argv: &[String], passthrough: &[String]) -> Result<ServerProcess> {
+pub fn spawn_server(argv: &[String], passthrough: &[String], sandbox: Option<&SandboxSpec>) -> Result<ServerProcess> {
     let (prog, args) = argv.split_first().context("empty server command")?;
     validate_env_names(passthrough)?;
     let resolved = resolve_program(prog);
-    let env = scrubbed_env(passthrough);
-    let mut cmd = CommandWrap::with_new(&resolved, |c| {
-        c.args(args)
+    let mut env = scrubbed_env(passthrough);
+    // I5: run through the `__sandbox-exec` helper, which applies the sandbox
+    // and then execs the server in place (same PID, same process tree).
+    let (exe, args): (PathBuf, Vec<OsString>) = match sandbox {
+        None => (resolved.clone(), args.iter().map(OsString::from).collect()),
+        Some(spec) => {
+            let me = std::env::current_exe().context("locating the mcpsum binary for the sandbox helper")?;
+            let mut a: Vec<OsString> = vec![
+                "__sandbox-exec".into(),
+                "--spec".into(),
+                serde_json::to_string(spec)?.into(),
+                "--".into(),
+                resolved.clone().into_os_string(),
+            ];
+            a.extend(args.iter().map(OsString::from));
+            env.retain(|(k, _)| !matches!(k.to_str(), Some("TMPDIR" | "TMP" | "TEMP")));
+            for k in ["TMPDIR", "TMP", "TEMP"] {
+                env.push((k.into(), spec.tmp.clone().into_os_string()));
+            }
+            (me, a)
+        }
+    };
+    let mut cmd = CommandWrap::with_new(&exe, |c| {
+        c.args(&args)
             .env_clear()
             .envs(env)
             .stdin(Stdio::piped())
