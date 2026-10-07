@@ -60,6 +60,7 @@ fn lock() -> ServerLock {
 fn policy_lock() -> ServerLock {
     let mut l = lock();
     l.policy = Some(ServerPolicy {
+        sandbox: None,
         taint: Some(TaintPolicy {
             sources: ["noargs".to_string(), ALL_RESOURCES.to_string()].into(),
             sinks: ["add".to_string()].into(),

@@ -2224,6 +2224,7 @@ mod tests {
     fn taint_mon() -> Monitor {
         let mut l = ServerLock::from_surface(vec!["demo".into()], vec![], taint_surface()).unwrap();
         l.policy = Some(ServerPolicy {
+            sandbox: None,
             taint: Some(TaintPolicy {
                 sources: ["fetch".to_string(), ALL_RESOURCES.to_string()].into(),
                 sinks: ["send".to_string(), "fetch".to_string()].into(),
