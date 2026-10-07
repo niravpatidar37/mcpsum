@@ -55,7 +55,7 @@ use a lockfile whose digests do not match its contents.
 | `envPassthrough` | **Names** of environment variables passed to the server. Values are never stored. Everything else is withheld. |
 | `protocolVersion`, `serverInfo`, `capabilities`, `instructions` | What the server reported at lock time. Served to the client from here. Changes count as *informational* drift, except `instructions`, which is definitional. |
 | `tools`, `prompts`, `resources`, `resourceTemplates` | The full definitions as returned by the server (all pages), keyed by `name`, `name`, `uri` and `uriTemplate`. Served to the client from here. Capped at 1,000 items per kind. |
-| `policy` | Optional, written by **you** (never by the server). See [Policy](#policy-optional-i6). Not covered by `digests`, and kept when the server is re-locked. |
+| `policy` | Optional, written by **you** (never by the server): taint labels ([I6](#policy-optional-i6)) and a sandbox ([I5](#sandbox-optional-i5)). Not covered by `digests`, and kept when the server is re-locked. |
 | `digests` | SHA-256 over the RFC 8785 canonical JSON of each item, plus one over the whole surface. mcpsum recomputes them on load and refuses a lockfile that does not match. |
 
 ## Policy (optional, I6)
@@ -101,6 +101,31 @@ Rules:
 - When you re-lock a server, its policy is kept. Labels for tools that no
   longer exist are dropped and `lock` prints them. A renamed tool is **not**
   protected until you label it again.
+
+## Sandbox (optional, I5)
+
+Add `policy.sandbox` to a server entry to run it under an OS sandbox (Linux):
+
+```json
+"policy": {
+  "sandbox": {
+    "filesystem": { "read": ["~/notes"], "write": ["${TMP}/work"] },
+    "network": { "allow": [] }
+  }
+}
+```
+
+| Key | Meaning |
+|---|---|
+| `filesystem.read` | Extra paths the server may read (recursively), beyond the runtime base. |
+| `filesystem.write` | Paths it may read and write. Its private temporary directory (`${TMP}`, also in `TMPDIR`) is always writable. |
+| `network.allow` | Must be `[]` for now: no network at all. Host allowlists (`"api.github.com:443"`) come next. |
+
+Paths are absolute, `~/...` or `${TMP}/...`, without `..`, and must exist.
+A write path that would cover `mcp.lock`, its directory, the audit log, the
+taint state, the mcpsum binary or your home directory is refused. On macOS and
+Windows a server with a sandbox policy does not start. See
+[I5](GUARANTEES.md#i5--the-server-process-is-sandboxed-opt-in-linux-no-network).
 
 ## Drift classes
 

@@ -7,6 +7,13 @@ All notable changes are recorded here. The format follows
 ## [Unreleased]
 
 ### Added
+- I5 sandbox, opt-in, Linux (#14, design 0002). A `policy.sandbox` section in `mcp.lock`
+  runs the server under Landlock (deny-by-default files: a runtime base, its own program
+  and the listed paths; home directory not readable; mcpsum's files never writable) and
+  seccomp (no network sockets, no `io_uring`, no namespaces, mounts, `bpf`, keyrings or
+  `ptrace`). A policy that cannot be enforced, or that would expose mcpsum's files, stops
+  the server from starting; macOS and Windows refuse sandboxed servers for now. Network
+  allowlists by host come next.
 - I6 taint tracking, opt-in and per server (preview, #16). A user-written `policy.taint`
   section in `mcp.lock` labels tools as sources and sinks. After a source's result (or
   error, or progress message) reaches the client, a sink call is held for the user's

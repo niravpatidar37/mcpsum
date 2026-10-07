@@ -251,3 +251,23 @@ restriction globally.
    inform §5.6.
 2. **Fail closed:** a server whose sandbox cannot be enforced does not start.
    No "run unsandboxed" switch; to run without a sandbox, remove the policy.
+
+## 11. Implementation notes (step 2, 2026-10-07)
+
+- Helper: `mcpsum __sandbox-exec --spec <json> -- <server>` (hidden). The proxy,
+  `lock` (re-lock) and `verify` all start sandboxed servers through it.
+- Crates: `landlock` 0.4.7 (knows ABIs 1–9; best effort upwards, fails closed
+  when Landlock is not enforced at all) and `seccompiler` 0.5.0 (rust-vmm).
+  Two stacked filters, because a filter has one match action: `EPERM` for the
+  denied set, `ENOSYS` for `clone3`.
+- Added to §5.4: `io_uring` is denied, because it can create sockets without
+  `socket(2)`.
+- Each network layer is tested alone, because Landlock has no UDP rules before
+  ABI 10 and no TCP rules before ABI 4: seccomp alone blocks TCP and UDP;
+  Landlock alone blocks TCP.
+- Found in testing: Landlock rules do not match on 9p mounts (Docker bind
+  mounts from Windows, WSL's `/mnt/c`), so a server there fails to start
+  (fail closed). Documented in GUARANTEES.
+- The runtime base also includes `/proc` and `/sys` (interpreters read both).
+  Landlock's ptrace rules keep other processes' memory and environment out of
+  reach; command lines stay visible.

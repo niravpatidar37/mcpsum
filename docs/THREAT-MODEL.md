@@ -67,9 +67,9 @@ The per-guarantee statements and their tests are in [GUARANTEES.md](GUARANTEES.m
 | 10 | **Resource exhaustion** (huge lines, floods, a wedged pipe) | — | I7: 4 MiB line cap, pending/queue caps, write-ahead failure, wedged-server quarantine | **Enforced** |
 | 11 | **Terminal injection** via definitions or stderr | Trojan Source, [CVE-2021-42574](https://nvd.nist.gov/vuln/detail/CVE-2021-42574) | All server text escaped before display; stderr relayed escaped and prefixed | **Enforced** |
 | 12 | **Environment secret theft** | — | Scrubbed environment; explicit `--env NAME` passthrough; values never stored | **Enforced** (for env vars only) |
-| 13 | **Malicious code behind unchanged definitions** (postmark-mcp BCC) | [Koi Security](https://www.koi.security/blog/postmark-mcp-npm-malicious-backdoor-email-theft) | Pin the package version in the locked command; audit trail. Sandbox and egress allowlist planned (I5) | **Not prevented** |
+| 13 | **Malicious code behind unchanged definitions** (postmark-mcp BCC) | [Koi Security](https://www.koi.security/blog/postmark-mcp-npm-malicious-backdoor-email-theft) | Pin the package version in the locked command; audit trail. With an I5 sandbox (Linux, opt-in) it cannot read your files or reach other hosts, but can still abuse an API it is allowed to use | **Partly prevented** (opt-in, Linux) |
 | 14 | **Indirect prompt injection in tool results** | [CaMeL](https://arxiv.org/abs/2503.18813), [design patterns](https://arxiv.org/abs/2506.08837) | Results pass through. With an opt-in taint policy (I6), a sink cannot run after untrusted content without the user's approval, across all servers of the client session | **Partly prevented** (opt-in) |
-| 15 | **Filesystem / network access outside MCP** | — | None in v0.1 (I5 planned) | **Not prevented** |
+| 15 | **Filesystem / network access outside MCP** | — | I5 sandbox (opt-in, Linux): deny-by-default files via Landlock, no network via seccomp + Landlock; host allowlists next | **Prevented when sandboxed** (Linux) |
 | 16 | **Bypass by configuring the server directly** | — | Out of mcpsum's control; use client allowlists or managed policies | **Not prevented** |
 
 ## Framework mapping
@@ -90,7 +90,8 @@ These are the risks that remain, from highest to lowest:
 1. **Malicious code behind honest definitions (13).** This is the most
    realistic remaining path, and it is how the first malicious MCP server
    found in the wild worked. Mitigation today: pin versions and review
-   upgrades. Real fix: I5.
+   upgrades. With an I5 sandbox it cannot read your secrets or send them to
+   another host; abusing an API it is allowed to use still needs I4.
 2. **Indirect injection through results (14).** I6 (opt-in) stops silent
    sink calls after untrusted content; it does not stop the model being misled,
    it depends on a correct policy, approval fatigue is real, and an agent

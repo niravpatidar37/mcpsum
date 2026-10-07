@@ -117,6 +117,74 @@ cannot use them.
 e2e: `test_I3_server_initiated_requests_never_reach_client`,
 `test_I3_modern_discover_is_denied_by_default`. Property: invariant I3.
 
+## I5 — The server process is sandboxed (opt-in, Linux, no network)
+
+**Statement.** If the server's entry in `mcp.lock` has a `policy.sandbox`
+section (see [LOCKFILE.md](LOCKFILE.md#sandbox-optional-i5)), mcpsum starts it
+under OS-enforced, deny-by-default rules, and refuses to start it if they
+cannot be enforced:
+
+- **Files (Landlock).** It may read only a minimal runtime base (`/usr`,
+  `/lib*`, `/bin`, `/sbin`, `/etc`, `/proc`, `/sys`, a few `/dev` files), its
+  own program, absolute file arguments, and the paths the policy lists. It
+  may write only the listed paths and a private temporary directory. **Your
+  home directory is not readable** unless you list part of it, so `~/.ssh`
+  and `~/.aws` are out of reach.
+- **mcpsum's own files can never be made writable.** A policy whose write
+  paths would cover `mcp.lock`, its directory, the audit log, the taint state,
+  the mcpsum binary or your home directory is refused, because Landlock has no
+  deny rules.
+- **No network.** seccomp refuses `AF_INET`, `AF_INET6`, `AF_PACKET` and
+  `AF_NETLINK` sockets (so no TCP, UDP or DNS on any kernel), and Landlock
+  also denies TCP bind and connect on Linux ≥ 6.7. `io_uring` is refused,
+  because it can create sockets without `socket(2)`.
+- **No privilege building.** seccomp refuses new namespaces (`unshare`,
+  `setns`, `clone` namespace flags; `clone3` returns `ENOSYS` so libc falls back
+  to `clone`), mounts, `bpf`, keyrings, `ptrace` and `perf_event_open`.
+  Landlock scopes signals and abstract Unix sockets on Linux ≥ 6.12.
+- Re-locking and `verify` also run the server inside its sandbox. The audit
+  log records the sandbox at start (Landlock ABI, path counts).
+
+Design, options and threat model: [design 0002](design/0002-sandbox.md).
+
+**Limits.**
+
+- **Linux only.** On macOS and Windows a server with `policy.sandbox` does not
+  start (fail closed). Network **allowlists** (`"api.github.com:443"`) are the
+  next step; until then any `network.allow` entry is refused.
+- **Abuse of an allowed API is not prevented** (the postmark-mcp case); that
+  needs I4. A no-network sandbox suits local servers (files, git, databases on
+  a socket you grant); servers that call web APIs need the allowlist.
+- **Install first.** A sandboxed `npx`/`uvx` command cannot download
+  packages. Install the server first and lock the installed command.
+- **Filesystems need stable inodes.** Landlock cannot grant paths on 9p mounts
+  such as WSL's `/mnt/c`; such a server fails to start. Keep it on the Linux
+  filesystem.
+- `/etc` and `/proc` are readable. Landlock's ptrace rules stop a sandboxed
+  process from reading other processes' memory or environment, but command
+  lines in `/proc/*/cmdline` are visible. File *existence* (`stat`) is not
+  hidden.
+- Before Landlock ABI 9 (Linux 7.1), connecting to a pathname Unix socket the
+  user may write (for example `/run/docker.sock` for members of `docker`) is
+  not controlled.
+- Kernel bugs: Landlock and seccomp are kernel code.
+
+**Tests.** e2e, against the real binary on Linux:
+`test_I5_sandboxed_server_cannot_read_secrets_touch_mcpsum_files_or_reach_the_network`
+(read `~/.ssh/id_rsa`, write `~/.bashrc`, `mcp.lock` and the audit log, TCP,
+UDP and a user namespace are all denied; its temporary directory and running
+programs still work) with the control
+`test_I5_without_a_sandbox_the_probe_succeeds`;
+`test_I5_policy_that_would_expose_mcpsum_files_is_refused`,
+`test_I5_relock_and_verify_run_the_server_inside_its_sandbox`,
+`test_I5_sandboxed_server_does_not_start_without_a_backend` (Windows).
+Each network layer alone: `i5_seccomp_alone_blocks_tcp_and_udp`,
+`i5_landlock_alone_blocks_tcp_where_the_kernel_supports_it`. Grant rules:
+`i5_grant_is_deny_by_default_and_never_includes_home`,
+`i5_writes_that_would_cover_mcpsum_files_or_home_are_refused`.
+Mutation-checked: removing Landlock, seccomp, either network layer, the
+namespace rules or the protected-path check each fails a test.
+
 ## I6 — Untrusted results cannot silently trigger sinks (opt-in)
 
 **Statement.** If the server's entry in `mcp.lock` has a `policy.taint` section
@@ -275,7 +343,7 @@ e2e: `test_I8_audit_log_verifies_and_detects_tampering`,
 | ID | Guarantee | Milestone |
 |----|-----------|-----------|
 | I4 | Credential broker: servers receive scoped, short-lived credentials, never your raw secrets | M2 |
-| I5 | Sandbox with a network egress allowlist per server | M2 |
+| I5+ | Network egress allowlist by host (namespace + audited proxy); macOS and Windows backends | M2 |
 | I6+ | Confidentiality labels (private data cannot reach public sinks) and per-argument rules | M3 |
 
 ## Limits
@@ -290,8 +358,9 @@ What mcpsum does **not** protect against today:
    `postmark-mcp` 1.0.16 BCC'd every email to its author through Postmark's
    legitimate API ([Koi Security](https://www.koi.security/blog/postmark-mcp-npm-malicious-backdoor-email-theft)).
    The server's code changed, but its tool definitions did not. Pin the
-   package version in the locked command and keep it pinned. I5 (sandbox and
-   egress allowlist) targets this.
+   package version in the locked command and keep it pinned. The I5 sandbox
+   stops it reaching *other* hosts or your files; abuse of the allowed API
+   itself needs I4 (credential broker).
 3. **Prompt injection in tool results.** Results are passed through so tools
    keep working. An injected instruction in a web page or an email can still
    reach the model. With a taint policy (I6, opt-in) it cannot silently trigger
@@ -300,8 +369,10 @@ What mcpsum does **not** protect against today:
    own shell tool can bypass it. Strong defenses need application design
    changes ([CaMeL, arXiv:2503.18813](https://arxiv.org/abs/2503.18813);
    [design patterns, arXiv:2506.08837](https://arxiv.org/abs/2506.08837)).
-4. **No sandbox yet.** The server process runs with your user's permissions.
-   It can read files and open network connections outside MCP.
+4. **Sandbox is opt-in and Linux-only.** Without `policy.sandbox` (and on
+   macOS and Windows) the server process runs with your user's permissions
+   and can read files and open network connections outside MCP. Network
+   allowlists by host are not available yet; see [I5](#i5--the-server-process-is-sandboxed-opt-in-linux-no-network).
 5. **Servers not behind mcpsum.** If a server is configured in your client
    directly, mcpsum is not in the path.
 6. **Bugs in mcpsum.** The trusted core is small, written in Rust, property

@@ -45,6 +45,7 @@ enforce anything.
 | **I1** | **Definitions are served from `mcp.lock`.** Tool, prompt and resource lists, instructions and server info come from the file you reviewed. Live definitions are only *compared* with it; any change quarantines the server. |
 | **I2** | **Calls are checked against the locked schema, strictly.** Unapproved tools and hidden extra arguments (`sidenote: <your SSH key>`) are refused before they reach the server. |
 | **I3** | **Deny by default, both ways.** Servers cannot sample your model, elicit input from your user or list your roots. Unknown methods are refused. |
+| **I5** | **Sandboxed server process** (opt-in, Linux). With `policy.sandbox`, the server can't read your home directory or touch mcpsum's files, has no network, and can't build privileges (Landlock + seccomp). If the sandbox can't be enforced, the server doesn't start. |
 | **I6** | **Untrusted results can't silently trigger sensitive calls** (opt-in). Label tools as sources and sinks in `mcp.lock` (`mcpsum suggest-policy` helps); after a source's result, a sink call on *any* server of the session needs your approval in mcpsum's own prompt, or is refused. |
 | **I7** | **Fail closed.** Malformed, oversize, batched, spoofed or out-of-order messages are dropped; a server that wedges its pipe is quarantined. |
 | **I8** | **Hash-chained audit log** of every decision. Argument values are never logged, only their digest. |
@@ -176,11 +177,13 @@ Read this before you rely on mcpsum. Details: [GUARANTEES.md § Limits](docs/GUA
 - **It trusts what you approve.** A definition that was poisoned when you locked it is
   served faithfully. `lock` flags hidden characters, injection markers and cross-server
   shadowing, but that check is a heuristic. Read the diff.
-- **It does not sandbox the server.** The server still runs with your user's permissions.
+- **The sandbox is opt-in and Linux-only, with no network allowlists yet.** Without
+  `policy.sandbox` (and on macOS/Windows), the server runs with your user's permissions.
   The first malicious MCP server found in the wild, `postmark-mcp`, BCC'd emails through
   its own legitimate API without changing its tool definitions
   ([Koi Security](https://www.koi.security/blog/postmark-mcp-npm-malicious-backdoor-email-theft)).
-  Pinning versions helps. A sandbox with an egress allowlist is milestone M2.
+  A sandbox stops a server reaching your files or other hosts, but not abuse of an API it
+  is allowed to use. Pinning versions helps.
 - **It does not filter tool results.** A prompt injection inside a web page or an email
   that a tool returns can still reach the model. With a taint policy (I6, opt-in) it can't
   silently trigger a sink on any server of the session, but an agent with its own unmediated
@@ -209,7 +212,7 @@ Read this before you rely on mcpsum. Details: [GUARANTEES.md § Limits](docs/GUA
 | Milestone | Scope |
 |---|---|
 | **M1** (now) | Lockfile, proxy, CLI, test suite, docs, signed release binaries |
-| **M2** | Sandbox with a per-server network egress allowlist; credential broker (servers get scoped tokens, not your secrets) |
+| **M2** | Sandbox (Linux, files + no network: shipped) with a per-host egress allowlist next; macOS/Windows backends; credential broker (servers get scoped tokens, not your secrets) |
 | **M3** | Taint tracking: untrusted results cannot trigger sensitive calls without approval (shipped, opt-in). Next: confidentiality labels and per-argument rules |
 | **M4** | Benchmarks (AgentDojo-style), public bypass challenge |
 | **M5** | Public transparency log of definitions (like Go's checksum database), microVM backend, external audit |
