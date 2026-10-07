@@ -29,7 +29,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   # Bump deliberately (Dependabot does not track this). Fetched by exact SHA below.
-  MERGECODE_SHA: f69293ec74c9fef95f6c582f84c1b0b062dae3a6
+  MERGECODE_SHA: e7321b3e8a61a46876af38eae2a5ddfccfe37508
 
 jobs:
   judge:
