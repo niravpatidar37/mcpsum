@@ -23,9 +23,12 @@ use crate::process::{relay_stderr, spawn_server};
 pub const PROBE_PROTOCOL_VERSION: &str = "2025-11-25";
 const MAX_PAGES: usize = 50;
 
+#[derive(Debug, Clone)]
 pub struct ProbeOptions {
     pub timeout: Duration,
     pub max_line_bytes: usize,
+    /// I5: probe the server inside its sandbox (re-lock and verify).
+    pub sandbox: Option<crate::sandbox::SandboxSpec>,
 }
 
 impl Default for ProbeOptions {
@@ -33,6 +36,7 @@ impl Default for ProbeOptions {
         Self {
             timeout: Duration::from_secs(30),
             max_line_bytes: 4 * 1024 * 1024,
+            sandbox: None,
         }
     }
 }
@@ -123,7 +127,7 @@ impl Session {
 }
 
 pub fn probe(argv: &[String], env_passthrough: &[String], opts: &ProbeOptions) -> Result<Surface> {
-    let mut server = spawn_server(argv, env_passthrough)?;
+    let mut server = spawn_server(argv, env_passthrough, opts.sandbox.as_ref())?;
     // Declared before `server` is moved into the guard below, so it is dropped
     // *after* it: the tree is killed first, then buffered stderr gets a bounded
     // grace period to drain.

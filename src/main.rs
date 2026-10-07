@@ -10,9 +10,10 @@ use mcpsum::lock::{suggest_taint_policy, Change, LockFile, ServerLock};
 use mcpsum::monitor::Policy;
 use mcpsum::probe::{probe, ProbeOptions};
 use mcpsum::process::validate_env_names;
-use mcpsum::proxy::run_proxy;
+use mcpsum::proxy::{run_proxy, sandbox_argv};
 use mcpsum::render::escape_untrusted;
 use mcpsum::report::{findings, render_changes};
+use mcpsum::sandbox::{prepare, SandboxSpec};
 use mcpsum::taint;
 
 /// Exit codes are part of the CLI contract (CI depends on them).
@@ -101,6 +102,14 @@ enum Cmd {
         #[arg(long)]
         name: String,
     },
+    /// Internal: apply a sandbox and exec the server (used by mcpsum itself).
+    #[command(name = "__sandbox-exec", hide = true)]
+    SandboxExec {
+        #[arg(long)]
+        spec: String,
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
+    },
     /// Inspect or reset tainted client sessions (I6).
     Taint {
         #[command(subcommand)]
@@ -154,6 +163,7 @@ fn main() -> ExitCode {
         Cmd::Show { lock, name } => cmd_show(&lock, name.as_deref()),
         Cmd::AuditVerify { path } => cmd_audit_verify(&path),
         Cmd::SuggestPolicy { lock, name } => cmd_suggest_policy(&lock, &name),
+        Cmd::SandboxExec { spec, command } => cmd_sandbox_exec(&spec, &command),
         Cmd::Taint { cmd } => match cmd {
             TaintCmd::List => cmd_taint_list(),
             TaintCmd::Reset { session, all } => cmd_taint_reset(session.as_deref(), all),
@@ -204,6 +214,20 @@ fn cmd_lock(
     let opts = ProbeOptions {
         timeout: Duration::from_secs(timeout_secs),
         ..ProbeOptions::default()
+    };
+    // Re-locking a sandboxed server probes it inside its sandbox too.
+    let old_sandbox = lf
+        .servers
+        .get(name)
+        .and_then(|s| s.policy.as_ref())
+        .and_then(|p| p.sandbox.clone());
+    let prepared = match &old_sandbox {
+        Some(sb) => Some(prepare(name, sb, &sandbox_argv(&command), lock, None)?),
+        None => None,
+    };
+    let opts = ProbeOptions {
+        sandbox: prepared.as_ref().map(|p| p.spec.clone()),
+        ..opts
     };
     let surface = probe(&command, &env, &opts)?;
     let mut entry = ServerLock::from_surface(command, env, surface)?;
@@ -277,6 +301,14 @@ fn cmd_verify(lock: &Path, name: Option<&str>, timeout_secs: u64, strict: bool) 
     let mut drift = false;
     for n in names {
         let entry = &lf.servers[n];
+        let prepared = match entry.policy.as_ref().and_then(|p| p.sandbox.as_ref()) {
+            Some(sb) => Some(prepare(n, sb, &sandbox_argv(&entry.command), lock, None)?),
+            None => None,
+        };
+        let opts = ProbeOptions {
+            sandbox: prepared.as_ref().map(|p| p.spec.clone()),
+            ..opts.clone()
+        };
         let live = probe(&entry.command, &entry.env_passthrough, &opts).with_context(|| format!("server `{n}`"))?;
         let changes = entry.surface.compare(&live)?;
         if changes.is_empty() {
@@ -422,4 +454,17 @@ fn cmd_taint_reset(session: Option<&str>, all: bool) -> Result<u8> {
         }
     }
     Ok(EXIT_OK)
+}
+
+fn cmd_sandbox_exec(spec: &str, command: &[String]) -> Result<u8> {
+    let spec: SandboxSpec = serde_json::from_str(spec).context("invalid sandbox spec")?;
+    #[cfg(target_os = "linux")]
+    {
+        match mcpsum::sandbox_linux::exec(&spec, command)? {}
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (spec, command);
+        bail!("sandboxes are enforced on Linux only so far; refusing to start the server")
+    }
 }

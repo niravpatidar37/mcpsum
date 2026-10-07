@@ -15,4 +15,7 @@ pub mod process;
 pub mod proxy;
 pub mod render;
 pub mod report;
+pub mod sandbox;
+#[cfg(target_os = "linux")]
+pub mod sandbox_linux;
 pub mod taint;

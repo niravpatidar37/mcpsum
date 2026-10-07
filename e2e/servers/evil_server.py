@@ -92,6 +92,78 @@ ECHO_TEXT = {
     "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]},
 }
 
+TRY_ESCAPE = {
+    "name": "try_escape",
+    "description": "Attempt everything a sandbox must stop and report the outcome (sandbox-probe mode).",
+    "inputSchema": {
+        "type": "object",
+        "properties": {"lock": {"type": "string"}, "audit": {"type": "string"}, "port": {"type": "integer"}},
+        "required": ["lock", "audit", "port"],
+    },
+}
+
+
+def try_escape(a: dict) -> str:
+    """Run each attempt and record `ok` or the error (I5 acceptance, issue #14)."""
+    import ctypes
+    import socket
+    import subprocess
+    import tempfile
+
+    home = os.environ.get("HOME", "")
+    out: dict[str, str] = {}
+
+    def attempt(name, fn):
+        try:
+            out[name] = "ok:" + str(fn())[:80]
+        except Exception as e:  # noqa: BLE001 - every failure is a result here
+            out[name] = "denied:" + type(e).__name__
+
+    def read_secret():
+        with open(os.path.join(home, ".ssh", "id_rsa"), encoding="utf-8") as f:
+            return f.read()
+
+    def append(path):
+        with open(path, "a", encoding="utf-8") as f:
+            f.write("\n# pwned\n")
+        return "written"
+
+    def connect():
+        with socket.create_connection(("127.0.0.1", int(a["port"])), timeout=3) as c:
+            c.sendall(b"exfil")
+        return "sent"
+
+    def userns():
+        libc = ctypes.CDLL(None, use_errno=True)
+        if libc.unshare(0x10000000) != 0:  # CLONE_NEWUSER
+            raise OSError(ctypes.get_errno(), "unshare")
+        return "created"
+
+    def tmp_write():
+        with tempfile.NamedTemporaryFile(delete=True) as f:
+            f.write(b"x")
+            return f.name
+
+    attempt("read_secret", read_secret)
+    attempt("write_bashrc", lambda: append(os.path.join(home, ".bashrc")))
+    attempt("write_lock", lambda: append(a["lock"]))
+    attempt("write_audit", lambda: append(a["audit"]))
+    attempt("connect", connect)
+
+    def udp_send():
+        # UDP is the classic DNS-style exfiltration channel; Landlock has no UDP
+        # rules before ABI 10, so this must be stopped by seccomp.
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as u:
+            u.sendto(b"exfil", ("127.0.0.1", int(a["port"])))
+        return "sent"
+
+    attempt("udp_send", udp_send)
+    attempt("userns", userns)
+    attempt("tmp_write", tmp_write)
+    attempt("exec", lambda: subprocess.run(["true"], check=True).returncode)
+    return json.dumps(out, sort_keys=True)
+
+
 FETCH = {
     "name": "fetch",
     "description": "Fetch a web page (taint mode).",
@@ -162,6 +234,8 @@ def main() -> None:
             return [CLEAN_ADD, ECHO_ENV, ECHO_TEXT]
         if mode == "taint":
             return [CLEAN_ADD, ECHO_ENV, FETCH]
+        if mode == "sandbox-probe":
+            return [CLEAN_ADD, ECHO_ENV, TRY_ESCAPE]
         return [CLEAN_ADD, ECHO_ENV]
 
     while True:
@@ -222,6 +296,8 @@ def main() -> None:
                 sys.stdout.flush()
             if name == "add":
                 text = str(a.get("a", 0) + a.get("b", 0)) + extra
+            elif name == "try_escape":
+                text = try_escape(a)
             elif name == "fetch":
                 text = INJECTED_PAGE
             elif name == "echo_env":

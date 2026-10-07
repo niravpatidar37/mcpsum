@@ -121,6 +121,88 @@ pub fn suggest_taint_policy(s: &Surface) -> TaintPolicy {
 pub struct ServerPolicy {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub taint: Option<TaintPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox: Option<SandboxPolicy>,
+}
+
+/// I5 (design 0002): OS-enforced limits for the server process. Deny by
+/// default: only the listed paths (plus a minimal read-only runtime base) and
+/// network destinations are reachable. An empty `network.allow` means no
+/// network at all.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SandboxPolicy {
+    #[serde(default)]
+    pub filesystem: FsPolicy,
+    #[serde(default)]
+    pub network: NetPolicy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FsPolicy {
+    /// Read (and execute) access, recursively. Absolute, `~/...` or `${TMP}/...`.
+    #[serde(default)]
+    pub read: Vec<String>,
+    /// Read and write access, recursively. Same syntax.
+    #[serde(default)]
+    pub write: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NetPolicy {
+    /// `host:port` destinations: exact host, `*.suffix`, IPv4 or `[IPv6]`.
+    #[serde(default)]
+    pub allow: Vec<String>,
+}
+
+/// Placeholder for the server's private temporary directory.
+pub const TMP_VAR: &str = "${TMP}";
+
+/// Syntax of a sandbox path. Resolution (does it exist, is it safe to grant)
+/// happens when the server is started; see `sandbox::prepare`.
+pub fn check_sandbox_path(p: &str) -> Result<()> {
+    let ok_start = p.starts_with('/') || p == "~" || p.starts_with("~/") || p == TMP_VAR || p.starts_with("${TMP}/");
+    if !ok_start {
+        bail!("sandbox path `{p}` must be absolute, `~/...` or `{TMP_VAR}/...`");
+    }
+    if p.contains('\0') || p.split('/').any(|c| c == "..") {
+        bail!("sandbox path `{p}` must not contain `..` or NUL");
+    }
+    Ok(())
+}
+
+/// Syntax of an egress allowlist entry: `host:port`, `*.suffix:port`,
+/// `1.2.3.4:port` or `[v6]:port`, port 1-65535. No schemes, paths or bare `*`.
+pub fn check_net_entry(e: &str) -> Result<()> {
+    let bad = || anyhow::anyhow!("network allow entry `{e}` must be `host:port` (e.g. `api.github.com:443`)");
+    let (host, port) = if let Some(rest) = e.strip_prefix('[') {
+        let (h, p) = rest.split_once("]:").ok_or_else(bad)?;
+        h.parse::<std::net::Ipv6Addr>().map_err(|_| bad())?;
+        (None, p)
+    } else {
+        let (h, p) = e.rsplit_once(':').ok_or_else(bad)?;
+        (Some(h), p)
+    };
+    let port: u32 = port.parse().map_err(|_| bad())?;
+    if !(1..=65535).contains(&port) {
+        return Err(bad());
+    }
+    if let Some(h) = host {
+        let name = h.strip_prefix("*.").unwrap_or(h);
+        let label_ok = |l: &str| {
+            !l.is_empty()
+                && l.len() <= 63
+                && l.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+                && !l.starts_with('-')
+                && !l.ends_with('-')
+        };
+        if name.is_empty() || name.len() > 253 || !name.split('.').all(label_ok) {
+            return Err(bad());
+        }
+    }
+    Ok(())
 }
 
 /// I6 labels. `sources`: results may contain attacker-controlled text.
@@ -362,6 +444,14 @@ impl ServerLock {
     /// Every label must name something locked. A misspelled tool name would
     /// leave the real tool unprotected, so it is an error (fail closed).
     pub fn check_policy(&self) -> Result<()> {
+        if let Some(sb) = self.policy.as_ref().and_then(|p| p.sandbox.as_ref()) {
+            for p in sb.filesystem.read.iter().chain(&sb.filesystem.write) {
+                check_sandbox_path(p).context("policy.sandbox.filesystem")?;
+            }
+            for e in &sb.network.allow {
+                check_net_entry(e).context("policy.sandbox.network")?;
+            }
+        }
         let Some(taint) = self.policy.as_ref().and_then(|p| p.taint.as_ref()) else {
             return Ok(());
         };
@@ -623,6 +713,7 @@ pub(crate) mod tests {
     fn i6_relock_keeps_the_policy_and_reports_labels_for_vanished_tools() {
         let mut old = sample_lock();
         old.policy = Some(ServerPolicy {
+            sandbox: None,
             taint: Some(TaintPolicy {
                 sources: ["add".to_string(), ALL_RESOURCES.to_string()].into(),
                 sinks: ["sub".to_string()].into(),
@@ -658,5 +749,70 @@ pub(crate) mod tests {
         // out). Writes: sink. No annotations: both (MCP defaults).
         assert_eq!(p.sources, set(&["fetch", "mystery", ALL_RESOURCES]));
         assert_eq!(p.sinks, set(&["fetch", "mystery", "write_file"]));
+    }
+    #[test]
+    fn i5_sandbox_policy_parses_round_trips_and_sits_outside_the_digests() {
+        let text = with_policy(
+            &sample_lockfile_text(),
+            json!({"sandbox": {"filesystem": {"read": ["~/notes", "/srv/data"], "write": ["${TMP}/out"]}, "network": {"allow": []}}}),
+        );
+        let lf = LockFile::parse(&text).unwrap();
+        let sb = lf.servers["demo"].policy.as_ref().unwrap().sandbox.as_ref().unwrap();
+        assert_eq!(sb.filesystem.read, vec!["~/notes", "/srv/data"]);
+        assert_eq!(sb.filesystem.write, vec!["${TMP}/out"]);
+        assert!(sb.network.allow.is_empty());
+        assert_eq!(lf.servers["demo"].digests, sample_lock().digests);
+        assert_eq!(LockFile::parse(&lf.to_pretty().unwrap()).unwrap(), lf);
+    }
+
+    #[test]
+    fn i5_sandbox_policy_rejects_ambiguous_paths_hosts_and_keys() {
+        for bad in [
+            json!({"sandbox": {"filesystem": {"read": ["relative/path"]}}}),
+            json!({"sandbox": {"filesystem": {"read": ["~user/x"]}}}),
+            json!({"sandbox": {"filesystem": {"write": ["/srv/../etc"]}}}),
+            json!({"sandbox": {"filesystem": {"write": [""]}}}),
+            json!({"sandbox": {"filesystem": {"write": ["${HOME}/x"]}}}),
+            json!({"sandbox": {"network": {"allow": ["api.github.com"]}}}),
+            json!({"sandbox": {"network": {"allow": ["api.github.com:0"]}}}),
+            json!({"sandbox": {"network": {"allow": ["api.github.com:70000"]}}}),
+            json!({"sandbox": {"network": {"allow": ["https://api.github.com:443"]}}}),
+            json!({"sandbox": {"network": {"allow": ["*:443"]}}}),
+            json!({"sandbox": {"network": {"allow": ["a.*.com:443"]}}}),
+            json!({"sandbox": {"filesystem": {"reads": ["/srv"]}}}),
+            json!({"sandbox": {"net": {"allow": []}}}),
+        ] {
+            assert!(
+                LockFile::parse(&with_policy(&sample_lockfile_text(), bad.clone())).is_err(),
+                "{bad}"
+            );
+        }
+        for good in [
+            "api.github.com:443",
+            "*.example.com:443",
+            "127.0.0.1:8080",
+            "[::1]:8443",
+        ] {
+            let p = json!({"sandbox": {"network": {"allow": [good]}}});
+            LockFile::parse(&with_policy(&sample_lockfile_text(), p)).unwrap();
+        }
+    }
+
+    #[test]
+    fn i5_relock_keeps_the_sandbox_policy() {
+        let mut old = sample_lock();
+        old.policy = Some(ServerPolicy {
+            taint: None,
+            sandbox: Some(SandboxPolicy {
+                filesystem: FsPolicy {
+                    read: vec!["~/notes".into()],
+                    write: vec![],
+                },
+                network: NetPolicy::default(),
+            }),
+        });
+        let mut new = sample_lock();
+        assert!(new.carry_policy_from(&old).is_empty());
+        assert_eq!(new.policy, old.policy);
     }
 }

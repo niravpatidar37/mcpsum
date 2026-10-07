@@ -22,7 +22,32 @@ use crate::lock::LockFile;
 use crate::monitor::{Action, AuditEvent, Decision, Dir, Monitor, Policy};
 use crate::process::{relay_stderr, spawn_server};
 use crate::render::escape_untrusted;
+use crate::sandbox::{prepare, SandboxSpec};
 use crate::taint::{default_session, default_state_dir, TaintStore};
+
+/// The server command as paths for the sandbox grant (program resolved
+/// through PATH, the way `spawn_server` will run it).
+pub fn sandbox_argv(command: &[String]) -> Vec<PathBuf> {
+    let mut v: Vec<PathBuf> = command.iter().map(PathBuf::from).collect();
+    if let Some(first) = command.first() {
+        v[0] = crate::process::resolve_program(first);
+    }
+    v
+}
+
+/// One audit line describing the sandbox a server starts under.
+pub fn sandbox_summary(spec: &SandboxSpec) -> String {
+    #[cfg(target_os = "linux")]
+    let abi = crate::sandbox_linux::landlock_abi();
+    #[cfg(not(target_os = "linux"))]
+    let abi = 0;
+    format!(
+        "server starts under the I5 sandbox (fails closed if it cannot be applied): Landlock ABI {abi}, \
+         {} read paths, {} write paths, no network",
+        spec.read.len(),
+        spec.write.len()
+    )
+}
 
 enum Event {
     Client(Frame),
@@ -99,7 +124,28 @@ pub fn run_proxy(
     let max = policy.max_line_bytes;
     let mut monitor = Monitor::new(server.clone(), policy);
 
-    let mut child = spawn_server(&server.command, &server.env_passthrough)?;
+    // I5: resolve and check the sandbox before anything runs (fail closed).
+    let sandbox = match server.policy.as_ref().and_then(|p| p.sandbox.as_ref()) {
+        Some(sb) => {
+            let prepared = prepare(name, sb, &sandbox_argv(&server.command), lock_path, Some(&audit_path))?;
+            let ev = AuditEvent {
+                dir: Dir::Internal,
+                method: None,
+                subject: Some("sandbox".into()),
+                decision: Decision::Allow,
+                reason: sandbox_summary(&prepared.spec),
+                args_digest: None,
+            };
+            write_ahead(&mut audit, &[Action::Audit(ev)], name)?;
+            Some(prepared)
+        }
+        None => None,
+    };
+    let mut child = spawn_server(
+        &server.command,
+        &server.env_passthrough,
+        sandbox.as_ref().map(|s| &s.spec),
+    )?;
     // Dropped at return, after the server tree is killed below: bounded drain.
     let _relay = relay_stderr(&mut child, name);
     let child_stdout = child.take_stdout().context("server stdout")?;

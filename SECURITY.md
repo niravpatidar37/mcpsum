@@ -26,7 +26,7 @@ a server-initiated request to the client, makes the proxy fail open, or lets an
 audit-log edit go undetected.
 
 Known limitations (not vulnerabilities; see [docs/GUARANTEES.md § Limits](docs/GUARANTEES.md#limits)
-and the [threat model](docs/THREAT-MODEL.md)): no sandbox yet, no credential
+and the [threat model](docs/THREAT-MODEL.md)): the sandbox is opt-in and Linux-only (no host allowlists yet), no credential
 broker yet, tool *results* are passed through unfiltered, trust-on-first-use
 at lock time, and stdio transport only.
 
