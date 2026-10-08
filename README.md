@@ -241,7 +241,8 @@ More detail: [threat model](docs/THREAT-MODEL.md) · [lockfile format](docs/LOCK
 ## Contributing and security
 
 Found a bypass? Please report it privately: see [SECURITY.md](SECURITY.md). Bypasses are
-the most valuable contributions this project can get. For everything else, see
+the most valuable contributions this project can get. To try, the
+[bypass challenge](docs/CHALLENGE.md) has win conditions and a local target. For everything else, see
 [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
