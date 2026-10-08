@@ -560,8 +560,14 @@ mod tests {
         if maybe_child() {
             return;
         }
-        // Run in CI with user namespaces allowed (see ci.yml); elsewhere a
-        // failure here means allowlist mode would refuse to start (fail closed).
+        // Ubuntu >= 23.10 withholds the capabilities a new user namespace
+        // needs, so allowlist mode refuses to start there (the e2e suite checks
+        // that). CI lifts the restriction for this job (ci.yml), so this runs.
+        let restricted = std::fs::read_to_string("/proc/sys/kernel/apparmor_restrict_unprivileged_userns");
+        if restricted.is_ok_and(|s| s.trim() == "1") {
+            eprintln!("skipped: AppArmor restricts unprivileged user namespaces here");
+            return;
+        }
         let r = run_child("sandbox_linux::tests::i5_namespace_alone_has_only_loopback", "netns");
         // The host's listener is unreachable from the namespace's own `lo`, and
         // there is no route anywhere else.
