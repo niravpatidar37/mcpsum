@@ -164,6 +164,104 @@ def try_escape(a: dict) -> str:
     return json.dumps(out, sort_keys=True)
 
 
+TRY_EGRESS = {
+    "name": "try_egress",
+    "description": "Try every way out of an allowlist sandbox and report the outcome (sandbox-probe mode).",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "listed": {"type": "integer"},
+            "by_name_only": {"type": "integer"},
+            "unlisted": {"type": "integer"},
+            "secret": {"type": "string"},
+        },
+        "required": ["listed", "by_name_only", "unlisted", "secret"],
+    },
+}
+
+
+def try_egress(a: dict) -> str:
+    """Each attempt records the proxy's status line, `echo:<reply>` or the error (I5 allowlist, #14)."""
+    import select
+    import socket
+    from urllib.parse import urlsplit
+
+    proxy = urlsplit(os.environ.get("HTTPS_PROXY", "http://127.0.0.1:1"))
+    out: dict[str, str] = {
+        "env": ",".join(k for k in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "NODE_USE_ENV_PROXY") if os.environ.get(k)),
+    }
+
+    def via_proxy(head: bytes, slow: bool = False) -> str:
+        with socket.create_connection((proxy.hostname, proxy.port), timeout=15) as c:
+            if slow:  # slow headers: one byte every 0.5 s until the proxy answers
+                for b in head:
+                    c.sendall(bytes([b]))
+                    if select.select([c], [], [], 0.5)[0]:
+                        break
+            else:
+                c.sendall(head)
+            reply = b""
+            while b"\r\n\r\n" not in reply:
+                chunk = c.recv(4096)
+                if not chunk:
+                    break
+                reply += chunk
+            status = reply.split(b"\r\n", 1)[0].decode()
+            if " 200 " not in status:
+                return status
+            c.sendall(b"ping")
+            return "echo:" + c.recv(16).decode()
+
+    def connect(host: str, port: int) -> str:
+        return "CONNECT %s:%d HTTP/1.1\r\nProxy-Authorization: Basic %s\r\n\r\n" % (host, port, a["secret"])
+
+    def attempt(name, fn):
+        try:
+            out[name] = str(fn())[:120]
+        except Exception as e:  # noqa: BLE001 - every failure is a result here
+            out[name] = "denied:" + type(e).__name__
+
+    listed, by_name, unlisted = int(a["listed"]), int(a["by_name_only"]), int(a["unlisted"])
+    attempt("allowed_ip", lambda: via_proxy(connect("127.0.0.1", listed).encode()))
+    attempt("allowed_name", lambda: via_proxy(connect("localhost", listed).encode()))
+    attempt("name_to_loopback", lambda: via_proxy(connect("localhost", by_name).encode()))
+    attempt("raw_ip_for_listed_name", lambda: via_proxy(connect("127.0.0.1", by_name).encode()))
+    attempt("unlisted_port", lambda: via_proxy(connect("127.0.0.1", unlisted).encode()))
+    attempt("unlisted_host", lambda: via_proxy(connect("example.com", 443).encode()))
+    attempt("metadata", lambda: via_proxy(connect("169.254.169.254", 80).encode()))
+    attempt("get", lambda: via_proxy(b"GET http://127.0.0.1:%d/secret-path HTTP/1.1\r\n\r\n" % listed))
+    attempt("oversized", lambda: via_proxy(b"CONNECT 127.0.0.1:%d HTTP/1.1\r\nX: %s\r\n\r\n" % (listed, b"a" * 20000)))
+    attempt("slow", lambda: via_proxy(connect("127.0.0.1", listed).encode(), slow=True))
+
+    def direct(host: str, port: int) -> str:
+        with socket.create_connection((host, port), timeout=3) as c:
+            c.sendall(b"exfil")
+        return "sent"
+
+    def udp() -> str:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as u:
+            u.sendto(b"exfil", ("127.0.0.1", listed))
+        return "sent"
+
+    def ipv6() -> str:
+        with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as s6:
+            s6.settimeout(3)
+            s6.connect(("::1", listed))
+        return "connected"
+
+    def cap_eff() -> str:
+        with open("/proc/self/status", encoding="utf-8") as f:
+            return next(line.split()[1] for line in f if line.startswith("CapEff:"))
+
+    attempt("direct_listed", lambda: direct("127.0.0.1", listed))
+    attempt("direct_public", lambda: direct("1.1.1.1", 443))
+    attempt("udp", udp)
+    attempt("dns", lambda: socket.getaddrinfo("example.com", 443))
+    attempt("ipv6", ipv6)
+    attempt("cap_eff", cap_eff)
+    return json.dumps(out, sort_keys=True)
+
+
 FETCH = {
     "name": "fetch",
     "description": "Fetch a web page (taint mode).",
@@ -235,7 +333,7 @@ def main() -> None:
         if mode == "taint":
             return [CLEAN_ADD, ECHO_ENV, FETCH]
         if mode == "sandbox-probe":
-            return [CLEAN_ADD, ECHO_ENV, TRY_ESCAPE]
+            return [CLEAN_ADD, ECHO_ENV, TRY_ESCAPE, TRY_EGRESS]
         return [CLEAN_ADD, ECHO_ENV]
 
     while True:
@@ -311,6 +409,8 @@ def main() -> None:
                 text = str(a.get("a", 0) + a.get("b", 0)) + extra
             elif name == "try_escape":
                 text = try_escape(a)
+            elif name == "try_egress":
+                text = try_egress(a)
             elif name == "fetch":
                 text = INJECTED_PAGE
             elif name == "echo_env":

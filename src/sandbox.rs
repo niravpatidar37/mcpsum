@@ -1,5 +1,6 @@
 //! I5: turn a server's `policy.sandbox` into a concrete, checked grant
-//! (design 0002). Enforcement lives in `sandbox_linux` (Landlock + seccomp);
+//! (design 0002). Enforcement lives in `sandbox_linux` (Landlock, seccomp and,
+//! for a network allowlist, a network namespace plus `egress`);
 //! every other platform refuses to start a sandboxed server (fail closed).
 //!
 //! The grant is **deny by default**: the server may read only a minimal
@@ -25,8 +26,46 @@ pub struct SandboxSpec {
     pub write: Vec<PathBuf>,
     /// The server's private temporary directory (also in `write`).
     pub tmp: PathBuf,
-    /// No network at all. (Allowlists come with the egress proxy.)
-    pub no_network: bool,
+    /// `policy.sandbox.network.allow`. Empty: no network at all. Otherwise
+    /// the server runs in its own network namespace and reaches only these
+    /// destinations, through mcpsum's egress proxy.
+    #[serde(default)]
+    pub net_allow: Vec<String>,
+}
+
+/// Inside the server's network namespace, the egress proxy listens here.
+pub const PROXY_PORT: u16 = 3128;
+/// The descriptor on which the helper hands the proxy's listening socket to
+/// mcpsum (a Unix socket pair set up by `process::spawn_server`).
+pub const EGRESS_FD: i32 = 3;
+
+impl SandboxSpec {
+    pub fn no_network(&self) -> bool {
+        self.net_allow.is_empty()
+    }
+
+    /// The variables that point HTTP clients at the egress proxy. Node's
+    /// built-in `fetch` ignores them without `NODE_USE_ENV_PROXY=1`.
+    pub fn proxy_env(&self) -> Vec<(&'static str, String)> {
+        if self.no_network() {
+            return vec![];
+        }
+        let url = format!("http://127.0.0.1:{PROXY_PORT}");
+        let mut v: Vec<(&'static str, String)> = [
+            "HTTPS_PROXY",
+            "https_proxy",
+            "HTTP_PROXY",
+            "http_proxy",
+            "ALL_PROXY",
+            "all_proxy",
+        ]
+        .into_iter()
+        .map(|k| (k, url.clone()))
+        .collect();
+        v.extend([("NO_PROXY", String::new()), ("no_proxy", String::new())]);
+        v.push(("NODE_USE_ENV_PROXY", "1".into()));
+        v
+    }
 }
 
 /// Inputs to [`resolve`], gathered by [`prepare`]; separate so the checks are
@@ -99,12 +138,7 @@ fn install_prefix(prog: &Path, home: Option<&Path>) -> PathBuf {
 /// Build the concrete grant for `argv` (whose first element is already
 /// resolved through PATH). Fails closed on anything unsafe or missing.
 pub fn resolve(policy: &SandboxPolicy, argv: &[PathBuf], ctx: &GrantInputs) -> Result<SandboxSpec> {
-    if !policy.network.allow.is_empty() {
-        bail!(
-            "policy.sandbox.network.allow is not supported yet (the egress proxy is the next step of design 0002); \
-             use `\"allow\": []` for no network, or remove policy.sandbox"
-        );
-    }
+    crate::egress::Allowlist::parse(&policy.network.allow).context("policy.sandbox.network.allow")?;
     let home = ctx.home.as_deref();
     let canon = |raw: &str| -> Result<PathBuf> {
         let p = expand(raw, home, &ctx.tmp)?;
@@ -159,7 +193,7 @@ pub fn resolve(policy: &SandboxPolicy, argv: &[PathBuf], ctx: &GrantInputs) -> R
         read,
         write,
         tmp: ctx.tmp.canonicalize()?,
-        no_network: true,
+        net_allow: policy.network.allow.clone(),
     })
 }
 
@@ -336,7 +370,7 @@ mod tests {
         let prog = f.root.join("bin/python");
         std::fs::write(&prog, "").unwrap();
         let spec = resolve(&policy(&[], &[]), &[prog, f.root.join("bin/server.py")], &f.ctx).unwrap();
-        assert!(spec.no_network);
+        assert!(spec.no_network() && spec.proxy_env().is_empty());
         assert!(spec.read.contains(&f.root.join("base/usr")));
         assert!(
             !spec.read.iter().any(|p| p.ends_with("missing")),
@@ -377,12 +411,18 @@ mod tests {
     }
 
     #[test]
-    fn i5_missing_paths_and_allowlists_fail_closed() {
+    fn i5_missing_paths_fail_closed_and_allowlists_reach_the_helper() {
         let f = fixture("missing");
         assert!(resolve(&policy(&["~/nope"], &[]), &[], &f.ctx).is_err());
         let mut p = policy(&[], &[]);
         p.network.allow = vec!["api.github.com:443".into()];
-        assert!(format!("{:#}", resolve(&p, &[], &f.ctx).unwrap_err()).contains("not supported yet"));
+        let spec = resolve(&p, &[], &f.ctx).unwrap();
+        assert_eq!(spec.net_allow, p.network.allow);
+        let env = spec.proxy_env();
+        assert!(env.contains(&("HTTPS_PROXY", "http://127.0.0.1:3128".into())));
+        assert!(env.contains(&("NODE_USE_ENV_PROXY", "1".into())));
+        p.network.allow = vec!["api.github.com".into()];
+        assert!(resolve(&p, &[], &f.ctx).is_err());
     }
 
     #[test]
