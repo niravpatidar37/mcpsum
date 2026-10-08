@@ -196,7 +196,9 @@ Read this before you rely on mcpsum. Details: [GUARANTEES.md § Limits](docs/GUA
   that a tool returns can still reach the model. With a taint policy (I6, opt-in) it can't
   silently trigger a sink on any server of the session, but an agent with its own unmediated
   shell tool can still bypass that.
-- **stdio only** for now. No remote/HTTP transport yet, and no 2026-07-28 `server/discover`.
+- **stdio only** for now. No remote/HTTP transport yet. 2026-07-28 clients work (mcpsum
+  answers `server/discover` from the lock), but the upstream server must still accept
+  `initialize`; see [Limits](docs/GUARANTEES.md#limits).
 
 ## How it is verified
 

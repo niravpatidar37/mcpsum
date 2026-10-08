@@ -11,6 +11,14 @@ All notable changes are recorded here. The format follows
   workflow) remaps build paths and links with `/Brepro` (Windows) or `-S` (macOS); a new
   `reproducible` workflow builds each of the 5 release targets twice in different directories
   and homes and fails if the SHA-256 differs. `docs/RELEASING.md` shows how to rebuild a release and compare.
+- 2026-07-28 clients (#21). A request with `io.modelcontextprotocol/protocolVersion`
+  in `_meta` and no `initialize` starts a modern session: `server/discover` and the list
+  methods are answered from `mcp.lock` (with `resultType`, `ttlMs: 0`,
+  `cacheScope: "private"` and the locked `serverInfo`), and mcpsum opens a legacy session
+  to the server itself, with no client capabilities, verifying it before any call. Other
+  revisions get `-32022`. A result with `resultType` other than `complete` (a multi
+  round-trip input request) is refused with `-32001` in every session. Servers that speak
+  only 2026-07-28 are not supported yet.
 - I5 sandbox, opt-in, Linux (#14, design 0002). A `policy.sandbox` section in `mcp.lock`
   runs the server under Landlock (deny-by-default files: a runtime base, its own program
   and the listed paths; home directory not readable; mcpsum's files never writable) and
