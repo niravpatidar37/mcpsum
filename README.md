@@ -170,6 +170,10 @@ mcpsum audit-verify .mcpsum-audit/time.jsonl
 | 2 | Heuristic findings with `lock --deny-findings` (nothing written) |
 | 3 | Usage, I/O or protocol error |
 
+**Using an AI coding agent?** [`skills/mcpsum/SKILL.md`](skills/mcpsum/SKILL.md) is an
+[Agent Skill](https://agentskills.io) that teaches it this workflow and the steps it must
+leave to you. Copy the folder to `~/.claude/skills/` (or your agent's skills directory).
+
 ## What it does not do
 
 Read this before you rely on mcpsum. Details: [GUARANTEES.md § Limits](docs/GUARANTEES.md#limits).
