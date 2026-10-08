@@ -20,6 +20,9 @@ export RUSTFLAGS="--remap-path-prefix=$cargo_home=/cargo --remap-path-prefix=$sr
 # PDB GUID; /Brepro derives both from a hash of the output (IMAGE_DEBUG_TYPE_REPRO,
 # https://learn.microsoft.com/en-us/windows/win32/debug/pe-format#debug-type).
 case "$target" in *-windows-msvc) RUSTFLAGS+=" -C link-arg=/Brepro" ;; esac
+# Apple's linker otherwise gave a different LC_UUID per build directory (its debug
+# map names object files by path); -S omits debug info, which strip drops anyway.
+case "$target" in *-apple-darwin) RUSTFLAGS+=" -C link-arg=-Wl,-S" ;; esac
 # Nothing in the build reads the clock today; if a build script ever does, it
 # should use the commit time. https://reproducible-builds.org/specs/source-date-epoch/
 SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(git log -1 --format=%ct)}"

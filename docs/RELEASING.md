@@ -61,9 +61,11 @@ Release binaries are built by [`scripts/release-build.sh`](../scripts/release-bu
 `SOURCE_DATE_EPOCH` set to the commit time
 ([spec](https://reproducible-builds.org/specs/source-date-epoch/)), and on
 Windows the linker's `/Brepro`, which replaces the link timestamp and PDB GUID
-with a hash of the output. The `reproducible` workflow builds every target twice
-on each PR and push to `main` (different checkout path, `HOME`/`CARGO_HOME`,
-time zone and time) and fails if the SHA-256 differs.
+with a hash of the output, and on macOS the linker's `-S` (no debug map, so the
+`LC_UUID` does not depend on the build directory). The `reproducible` workflow
+builds every target twice on each PR and push to `main` (different checkout
+path, `HOME`/`CARGO_HOME`/`RUSTUP_HOME`, time zone and time) and fails if the
+SHA-256 differs.
 
 To check a published binary, build the tag on the same OS and CPU architecture
 as the release runner (Ubuntu 24.04 with `musl-tools` for Linux, Windows with
