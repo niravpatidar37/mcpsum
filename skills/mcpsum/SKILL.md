@@ -80,7 +80,8 @@ mcpsum audit-verify .mcpsum-audit/time.jsonl
   never applied automatically. After an untrusted result, sink calls are held for the
   user's approval or refused. `mcpsum taint list` shows tainted sessions.
 - **Sandbox (I5, Linux):** `policy.sandbox` runs the server with no home-directory
-  access and no network. Install `npx`/`uvx` servers first; a sandboxed server cannot
+  access and no network, or only the `network.allow` destinations (HTTPS through
+  mcpsum's audited proxy; Ubuntu >= 23.10 needs the AppArmor profile mcpsum prints). Install `npx`/`uvx` servers first; a sandboxed server cannot
   download packages. On macOS and Windows a sandboxed server refuses to start.
 
 See `docs/LOCKFILE.md` for the exact schema.

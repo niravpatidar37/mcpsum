@@ -19,6 +19,15 @@ All notable changes are recorded here. The format follows
   revisions get `-32022`. A result with `resultType` other than `complete` (a multi
   round-trip input request) is refused with `-32001` in every session. Servers that speak
   only 2026-07-28 are not supported yet.
+- I5 network allowlist, Linux (#14, design 0002). `policy.sandbox.network.allow` with
+  `host:port` entries now runs the server in its own user and network namespace whose
+  only way out is mcpsum's egress proxy (`HTTPS_PROXY` and friends point at it). The proxy
+  allows only `CONNECT` to listed destinations, resolves names itself once and refuses
+  loopback, private and metadata addresses unless that IP is listed, bounds request size,
+  time and connections, and audits every connection (`host:port` and the decision only)
+  before opening it. seccomp still refuses UDP, DNS, raw sockets and IPv6. If the namespace
+  cannot be set up the server does not start; on Ubuntu >= 23.10 the error prints a
+  one-time AppArmor profile for mcpsum. TLS is not inspected.
 - I5 sandbox, opt-in, Linux (#14, design 0002). A `policy.sandbox` section in `mcp.lock`
   runs the server under Landlock (deny-by-default files: a runtime base, its own program
   and the listed paths; home directory not readable; mcpsum's files never writable) and

@@ -271,3 +271,37 @@ restriction globally.
 - The runtime base also includes `/proc` and `/sys` (interpreters read both).
   Landlock's ptrace rules keep other processes' memory and environment out of
   reach; command lines stay visible.
+
+## 12. Implementation notes (step 3, 2026-10-08)
+
+- **No bridge process.** Instead of a bridge in the helper forwarding to a
+  pathname Unix socket (§5.4, step 2), the helper binds `127.0.0.1:3128`
+  inside the new namespace and hands the *listening socket* to mcpsum over an
+  inherited socket pair (fd 3, `SCM_RIGHTS`). mcpsum accepts on it directly:
+  a socket stays in the namespace it was created in, whoever holds it. This
+  means one process fewer and no socket file the server could reach. The
+  helper closes both descriptors before `execve`.
+- **seccomp in allowlist mode** allows `AF_INET` stream sockets with protocol
+  0 or TCP only, because the server must reach the proxy on `lo`. It still
+  refuses every other `AF_INET` type (UDP, raw, `SOCK_SEQPACKET`, ...), other
+  protocols (SCTP, MPTCP), and `AF_INET6`, `AF_PACKET` and `AF_NETLINK`.
+  Landlock (ABI ≥ 4) allows TCP connect to port 3128 only. The empty
+  namespace has no route anyway, so these are three independent layers.
+- **Proxy** (`src/egress.rs`):
+  - `CONNECT` only; head limited to 8 KiB, 1 KiB request line, 5 s; at most
+    64 connections.
+  - Names are resolved once, then filtered (non-public dropped unless that
+    IP is listed); mcpsum connects only to those addresses.
+  - `*.suffix` matches subdomains only. Names ending in a numeric label are
+    refused (resolvers read `127.1` as an IP).
+  - Audit is write-ahead per connection: no record, no connection.
+  - `lock` and `verify` print egress decisions to stderr, because they have
+    no audit log.
+- **Ubuntu ≥ 23.10** (also GitHub's `ubuntu-24.04` runners): the user
+  namespace is created, but `lo` cannot be brought up. The helper fails
+  closed and prints the §6 profile for its own path. CI checks that refusal
+  first, then installs the printed profile for the e2e suite. The unit-test
+  job uses `sysctl kernel.apparmor_restrict_unprivileged_userns=0` instead,
+  because test binaries change path with every build.
+- Still open: macOS and Windows backends (#45), real-server runs
+  (step 4).

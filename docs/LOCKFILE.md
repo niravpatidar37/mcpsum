@@ -119,13 +119,14 @@ Add `policy.sandbox` to a server entry to run it under an OS sandbox (Linux):
 |---|---|
 | `filesystem.read` | Extra paths the server may read (recursively), beyond the runtime base. |
 | `filesystem.write` | Paths it may read and write. Its private temporary directory (`${TMP}`, also in `TMPDIR`) is always writable. |
-| `network.allow` | Must be `[]` for now: no network at all. Host allowlists (`"api.github.com:443"`) come next. |
+| `network.allow` | `[]`: no network at all. Or `host:port` entries (`"api.github.com:443"`, `"*.example.com:443"`, `"10.0.0.5:8080"`, `"[::1]:9000"`): the server reaches only these, over HTTPS through mcpsum's audited egress proxy (Linux, own network namespace). A name that resolves to a loopback, private or link-local address is refused unless that IP is listed too. |
 
 Paths are absolute, `~/...` or `${TMP}/...`, without `..`, and must exist.
 A write path that would cover `mcp.lock`, its directory, the audit log, the
 taint state, the mcpsum binary or your home directory is refused. On macOS and
 Windows a server with a sandbox policy does not start. See
-[I5](GUARANTEES.md#i5--the-server-process-is-sandboxed-opt-in-linux-no-network).
+[I5](GUARANTEES.md#i5--the-server-process-is-sandboxed-opt-in-linux)
+(including the one-time AppArmor step on Ubuntu ≥ 23.10 for `network.allow`).
 
 ## Drift classes
 
