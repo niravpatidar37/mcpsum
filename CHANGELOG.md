@@ -7,6 +7,10 @@ All notable changes are recorded here. The format follows
 ## [Unreleased]
 
 ### Added
+- Reproducible release binaries (#22). `scripts/release-build.sh` (used by the release
+  workflow) remaps build paths and, on Windows, links with `/Brepro`; a new `reproducible`
+  workflow builds each release target twice in different directories and homes and fails if
+  the SHA-256 differs. `docs/RELEASING.md` shows how to rebuild a release and compare.
 - I5 sandbox, opt-in, Linux (#14, design 0002). A `policy.sandbox` section in `mcp.lock`
   runs the server under Landlock (deny-by-default files: a runtime base, its own program
   and the listed paths; home directory not readable; mcpsum's files never writable) and
