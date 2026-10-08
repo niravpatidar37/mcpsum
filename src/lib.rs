@@ -6,6 +6,7 @@
 
 pub mod audit;
 pub mod canon;
+pub mod egress;
 pub mod filelock;
 pub mod framing;
 pub mod lock;
