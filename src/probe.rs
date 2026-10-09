@@ -132,6 +132,23 @@ pub fn probe(argv: &[String], env_passthrough: &[String], opts: &ProbeOptions) -
     // *after* it: the tree is killed first, then buffered stderr gets a bounded
     // grace period to drain.
     let _relay = relay_stderr(&mut server, "server");
+    // I5 allowlist mode: `lock` and `verify` have no audit log, so the egress
+    // proxy reports its decisions on stderr.
+    let _egress = match &opts.sandbox {
+        Some(spec) => {
+            let sink: crate::egress::AuditSink = std::sync::Arc::new(|ev: &crate::monitor::AuditEvent| {
+                eprintln!(
+                    "mcpsum: egress {:?} {}: {}",
+                    ev.decision,
+                    crate::render::escape_untrusted(ev.subject.as_deref().unwrap_or("-")),
+                    ev.reason
+                );
+                Ok(())
+            });
+            crate::proxy::start_egress(&mut server, spec, sink)?
+        }
+        None => None,
+    };
     let stdout = server.take_stdout().context("server stdout")?;
     let stdin = server.take_stdin().context("server stdin")?;
     let _guard = server; // ServerProcess kills the whole tree on drop

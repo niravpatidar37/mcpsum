@@ -48,6 +48,13 @@ jobs:
         shell: bash
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Allow unprivileged user namespaces (I5 namespace unit tests)
+        if: runner.os == 'Linux'
+        # Ubuntu 24.04 lets unprivileged processes create a user namespace but
+        # withholds the capabilities needed to bring up `lo` in it. The unit tests
+        # re-run the test binary, whose path changes with every build, so on this
+        # throwaway runner lift the restriction instead of writing a profile.
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - run: cargo test --locked --all-targets
 
   e2e:
@@ -71,6 +78,21 @@ jobs:
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           enable-cache: false
+      - name: I5 allowlist fails closed under Ubuntu's user-namespace restriction
+        if: runner.os == 'Linux'
+        working-directory: e2e
+        env:
+          MCPSUM_E2E_USERNS_RESTRICTED: "1"
+        run: |
+          test "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)" = 1
+          uv sync --frozen --python 3.12
+          uv run --frozen pytest -q -k ubuntu_userns_restriction
+      - name: Install the AppArmor profile that mcpsum prints (I5 allowlist mode)
+        if: runner.os == 'Linux'
+        run: |
+          printf 'abi <abi/4.0>,\ninclude <tunables/global>\nprofile mcpsum %s flags=(unconfined) {\n  userns,\n}\n' \
+            "$GITHUB_WORKSPACE/target/debug/mcpsum" | sudo tee /etc/apparmor.d/mcpsum
+          sudo apparmor_parser -r /etc/apparmor.d/mcpsum
       - name: Run adversarial suite
         working-directory: e2e
         run: |

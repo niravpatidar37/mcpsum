@@ -135,7 +135,7 @@ unit: `i3_input_required_result_is_refused_not_forwarded`,
 `i7_modern_unsupported_or_missing_version_is_rejected_and_never_forwarded`.
 Property: invariant I3, also from a session a modern client opened.
 
-## I5 — The server process is sandboxed (opt-in, Linux, no network)
+## I5 — The server process is sandboxed (opt-in, Linux)
 
 **Statement.** If the server's entry in `mcp.lock` has a `policy.sandbox`
 section (see [LOCKFILE.md](LOCKFILE.md#sandbox-optional-i5)), mcpsum starts it
@@ -152,27 +152,66 @@ cannot be enforced:
   paths would cover `mcp.lock`, its directory, the audit log, the taint state,
   the mcpsum binary or your home directory is refused, because Landlock has no
   deny rules.
-- **No network.** seccomp refuses `AF_INET`, `AF_INET6`, `AF_PACKET` and
-  `AF_NETLINK` sockets (so no TCP, UDP or DNS on any kernel), and Landlock
-  also denies TCP bind and connect on Linux ≥ 6.7. `io_uring` is refused,
-  because it can create sockets without `socket(2)`.
+- **No network** (`network.allow: []`). seccomp refuses `AF_INET`,
+  `AF_INET6`, `AF_PACKET` and `AF_NETLINK` sockets (so no TCP, UDP or DNS on
+  any kernel), and Landlock also denies TCP bind and connect on Linux ≥ 6.7.
+  `io_uring` is refused, because it can create sockets without `socket(2)`.
+- **Or only the listed destinations** (`"allow": ["api.github.com:443"]`):
+  - The server runs in its own user and network namespace, which has only
+    `lo` and no route. Its one way out is mcpsum's egress proxy at
+    `127.0.0.1:3128` inside that namespace. mcpsum sets `HTTPS_PROXY`,
+    `HTTP_PROXY` and `ALL_PROXY` (and their lowercase forms), an empty
+    `NO_PROXY`, and `NODE_USE_ENV_PROXY=1`. A client that ignores them has no
+    network at all.
+  - The proxy accepts only `CONNECT host:port` to a listed destination: an
+    exact host, `*.suffix` (subdomains only), or an IPv4 or `[IPv6]` literal,
+    with the same port. A raw IP is allowed only if that IP is listed.
+  - mcpsum resolves names itself, once, and connects only to an address it
+    checked. Loopback, private, link-local (cloud metadata
+    `169.254.169.254`), CGNAT and other non-public answers are refused unless
+    that IP is listed. This stops DNS rebinding into your machine or network.
+  - Requests are bounded: 8 KiB head, 5 s to send it, 64 open connections.
+    Other methods get 405.
+  - Every connection is written to the audit log **before** it is opened:
+    `egress/connect`, `host:port`, allow or deny. Headers, paths and payloads
+    are never logged. If the log cannot be written, the connection is refused.
+  - seccomp still refuses UDP (so no DNS), raw and other non-TCP sockets,
+    `AF_INET6`, `AF_PACKET` and `AF_NETLINK`. Landlock allows TCP connect only
+    to the proxy port. The server has no capabilities in its namespace.
+  - If the namespace cannot be created, the server does not start. On Ubuntu
+    ≥ 23.10, mcpsum prints a one-time AppArmor profile for its own binary
+    (see Limits).
 - **No privilege building.** seccomp refuses new namespaces (`unshare`,
   `setns`, `clone` namespace flags; `clone3` returns `ENOSYS` so libc falls back
   to `clone`), mounts, `bpf`, keyrings, `ptrace` and `perf_event_open`.
   Landlock scopes signals and abstract Unix sockets on Linux ≥ 6.12.
-- Re-locking and `verify` also run the server inside its sandbox. The audit
-  log records the sandbox at start (Landlock ABI, path counts).
+- Re-locking and `verify` also run the server inside its sandbox (egress
+  decisions go to stderr there). The audit log records the sandbox at start
+  (Landlock ABI, path counts, network mode).
 
 Design, options and threat model: [design 0002](design/0002-sandbox.md).
 
 **Limits.**
 
 - **Linux only.** On macOS and Windows a server with `policy.sandbox` does not
-  start (fail closed). Network **allowlists** (`"api.github.com:443"`) are the
-  next step; until then any `network.allow` entry is refused.
+  start (fail closed); backends are tracked in #45.
 - **Abuse of an allowed API is not prevented** (the postmark-mcp case); that
-  needs I4. A no-network sandbox suits local servers (files, git, databases on
-  a socket you grant); servers that call web APIs need the allowlist.
+  needs I4 (#15). **TLS is not inspected:** anything an allowed host serves is
+  reachable, including other sites behind a shared CDN (domain fronting).
+  List narrow host names.
+- **Allowlist mode speaks HTTPS through `CONNECT` only.** Plain `http://`
+  requests (sent to the proxy as `GET`) and other protocols (SSH, databases)
+  are refused. The audit log has `host:port`, not the address it resolved to.
+  A server can fill the log with refused attempts, one line each.
+- **Ubuntu ≥ 23.10 needs a one-time step for allowlist mode.**
+  `kernel.apparmor_restrict_unprivileged_userns=1` withholds the capabilities
+  needed to set up the namespace, so the server does not start. mcpsum's error
+  prints an AppArmor profile for its own binary (`userns,`) to install with
+  `sudo apparmor_parser -r`. That profile lets any local process run
+  `mcpsum __sandbox-exec` to get a user namespace. The helper's seccomp
+  filter keeps the *server* from using it to create more namespaces, but the
+  kernel surface is wider than without the profile. mcpsum never changes
+  system settings itself.
 - **Install first.** A sandboxed `npx`/`uvx` command cannot download
   packages. Install the server first and lock the installed command.
 - **Filesystems need stable inodes.** Landlock cannot grant paths on 9p mounts
@@ -196,12 +235,30 @@ programs still work) with the control
 `test_I5_policy_that_would_expose_mcpsum_files_is_refused`,
 `test_I5_relock_and_verify_run_the_server_inside_its_sandbox`,
 `test_I5_sandboxed_server_does_not_start_without_a_backend` (Windows).
+Allowlist mode:
+`test_I5_allowlisted_server_reaches_only_listed_destinations_through_the_audited_proxy`
+(a listed IP and a listed name work; a name resolving to loopback, a raw IP
+for a name-only entry, another port, another host, cloud metadata, `GET`, an
+oversized head and slow headers are refused; direct TCP, UDP, DNS and IPv6
+fail; no capabilities; one audit line per connection, no header values, and
+the chain verifies), `test_I5_allowlist_refuses_to_start_without_user_namespaces`,
+and in CI `test_I5_allowlist_fails_closed_under_ubuntu_userns_restriction`.
 Each network layer alone: `i5_seccomp_alone_blocks_tcp_and_udp`,
-`i5_landlock_alone_blocks_tcp_where_the_kernel_supports_it`. Grant rules:
+`i5_landlock_alone_blocks_tcp_where_the_kernel_supports_it`,
+`i5_seccomp_allowlist_mode_allows_only_tcp_streams`,
+`i5_namespace_alone_has_only_loopback`. The proxy:
+`i5_proxy_tunnels_only_to_listed_destinations_and_audits_each`,
+`i5_proxy_bounds_head_size_time_and_connections`,
+`i5_proxy_does_not_connect_when_the_audit_log_fails`,
+`i5_decide_refuses_raw_ips_and_names_resolving_inward`, and the fuzz target
+`egress_head`. Grant rules:
 `i5_grant_is_deny_by_default_and_never_includes_home`,
 `i5_writes_that_would_cover_mcpsum_files_or_home_are_refused`.
 Mutation-checked: removing Landlock, seccomp, either network layer, the
-namespace rules or the protected-path check each fails a test.
+namespace rules or the protected-path check each fails a test. So does
+removing any proxy check (port, suffix, raw IP, non-public filter, size,
+deadline, method, connection limit, write-ahead audit), the namespace, the
+seccomp rules of allowlist mode, the proxy variables, or the egress audit.
 
 ## I6 — Untrusted results cannot silently trigger sinks (opt-in)
 
@@ -361,7 +418,7 @@ e2e: `test_I8_audit_log_verifies_and_detects_tampering`,
 | ID | Guarantee | Milestone |
 |----|-----------|-----------|
 | I4 | Credential broker: servers receive scoped, short-lived credentials, never your raw secrets | M2 |
-| I5+ | Network egress allowlist by host (namespace + audited proxy); macOS and Windows backends | M2 |
+| I5+ | macOS and Windows sandbox backends | M2 |
 | I6+ | Confidentiality labels (private data cannot reach public sinks) and per-argument rules | M3 |
 
 ## Limits
@@ -389,8 +446,8 @@ What mcpsum does **not** protect against today:
    [design patterns, arXiv:2506.08837](https://arxiv.org/abs/2506.08837)).
 4. **Sandbox is opt-in and Linux-only.** Without `policy.sandbox` (and on
    macOS and Windows) the server process runs with your user's permissions
-   and can read files and open network connections outside MCP. Network
-   allowlists by host are not available yet; see [I5](#i5--the-server-process-is-sandboxed-opt-in-linux-no-network).
+   and can read files and open network connections outside MCP. See
+   [I5](#i5--the-server-process-is-sandboxed-opt-in-linux).
 5. **Servers not behind mcpsum.** If a server is configured in your client
    directly, mcpsum is not in the path.
 6. **Bugs in mcpsum.** The trusted core is small, written in Rust, property

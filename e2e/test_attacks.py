@@ -6,12 +6,13 @@ Each test names the guarantee it proves (see docs/GUARANTEES.md).
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 
 import pytest
 
-from harness import (EVIL, INVALID_PARAMS, METHOD_NOT_FOUND, QUARANTINED, Client, lock_evil, run)
+from harness import (BIN, EVIL, INVALID_PARAMS, METHOD_NOT_FOUND, QUARANTINED, Client, lock_evil, run)
 
 SECRETS = ("id_rsa", "IMPORTANT", "aws/credentials", "attacker@evil", "mcp.json")
 
@@ -621,6 +622,103 @@ def test_I5_relock_and_verify_run_the_server_inside_its_sandbox(tmp_path):
     assert run("verify", "--lock", str(lockp)).returncode == 0
     lock_evil(tmp_path, "sandbox-probe")  # re-lock keeps the policy
     assert "sandbox" in json.loads(lockp.read_text(encoding="utf-8"))["servers"]["evil"]["policy"]
+
+
+def echo_listener():
+    """A local stand-in for an internet host: echoes, and counts connections."""
+    import socket
+    import threading
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(16)
+    hits: list[int] = []
+
+    def echo(c):
+        with c:
+            try:
+                while data := c.recv(4096):
+                    c.sendall(data)
+            except OSError:
+                pass
+
+    def serve():
+        while True:
+            try:
+                c, _ = srv.accept()
+            except OSError:
+                return
+            hits.append(1)
+            threading.Thread(target=echo, args=(c,), daemon=True).start()
+
+    threading.Thread(target=serve, daemon=True).start()
+    return srv, srv.getsockname()[1], hits
+
+
+@linux_only
+def test_I5_allowlisted_server_reaches_only_listed_destinations_through_the_audited_proxy(tmp_path, client_factory):
+    import secrets
+    (listed_srv, listed, listed_hits), (name_srv, by_name, name_hits), (unl_srv, unlisted, unl_hits) = (
+        echo_listener(), echo_listener(), echo_listener())
+    lockp = lock_evil(tmp_path, "sandbox-probe")
+    add_sandbox_policy(lockp, {"network": {"allow": [f"127.0.0.1:{listed}", f"localhost:{listed}", f"localhost:{by_name}"]}})
+    secret = secrets.token_hex(8)
+    c = client_factory(lockp)
+    c.initialize()
+    r = c.call(1, "try_egress", {"listed": listed, "by_name_only": by_name, "unlisted": unlisted, "secret": secret})
+    report = json.loads(r["result"]["content"][0]["text"])
+    c.close()
+    for srv in (listed_srv, name_srv, unl_srv):
+        srv.close()
+    assert report["env"] == "HTTPS_PROXY,HTTP_PROXY,ALL_PROXY,NODE_USE_ENV_PROXY", report
+    # Listed: by IP, and by a name that resolves to loopback only because that IP is listed too.
+    assert report["allowed_ip"] == report["allowed_name"] == "echo:ping", report
+    # A name resolving to loopback (DNS rebinding), a raw IP for a name-only entry, another
+    # port, another host and cloud metadata are all refused by the proxy...
+    for k in ("name_to_loopback", "raw_ip_for_listed_name", "unlisted_port", "unlisted_host", "metadata"):
+        assert report[k].startswith("HTTP/1.1 403"), (k, report)
+    assert report["get"].startswith("HTTP/1.1 405"), report
+    assert report["oversized"].startswith("HTTP/1.1 431"), report
+    assert report["slow"].startswith("HTTP/1.1 408"), report
+    # ...and nothing gets around it: no route, no UDP or DNS, no IPv6, no capabilities.
+    for k in ("direct_listed", "direct_public", "udp", "dns", "ipv6"):
+        assert report[k].startswith("denied:"), (k, report)
+    assert report["cap_eff"] == "0000000000000000", report
+    assert len(listed_hits) == 2 and not name_hits and not unl_hits
+    # One audit event per proxy connection, host:port and decision only; the chain verifies.
+    text = c.audit.read_text(encoding="utf-8")
+    events = [json.loads(line)["event"] for line in text.splitlines()]
+    egress = [(e["decision"], e.get("subject")) for e in events if e.get("method") == "egress/connect"]
+    assert len(egress) == 10, egress
+    assert ("allow", f"127.0.0.1:{listed}") in egress and ("allow", f"localhost:{listed}") in egress, egress
+    for subject in (f"localhost:{by_name}", f"127.0.0.1:{by_name}", f"127.0.0.1:{unlisted}", "example.com:443",
+                    "169.254.169.254:80"):
+        assert ("deny", subject) in egress, (subject, egress)
+    assert secret not in text and "secret-path" not in text
+    assert "allowlisted destinations" in text
+    assert run("audit-verify", str(c.audit)).returncode == 0
+
+
+@linux_only
+def test_I5_allowlist_refuses_to_start_without_user_namespaces(tmp_path):
+    lockp = lock_evil(tmp_path, "sandbox-probe")
+    add_sandbox_policy(lockp, {"network": {"allow": ["example.com:443"]}})
+    # Run mcpsum itself inside a no-network sandbox, whose seccomp filter refuses
+    # unshare() the way a locked-down container or kernel would.
+    spec = json.dumps({"read": ["/"], "write": [str(tmp_path)], "tmp": str(tmp_path)})
+    r = run("__sandbox-exec", "--spec", spec, "--", BIN, "verify", "--lock", str(lockp), env={"TMPDIR": str(tmp_path)})
+    assert r.returncode == 3, r
+    assert "cannot create a user and network namespace" in r.stderr and "will not start" in r.stderr, r
+    assert "evil" not in r.stdout, r
+
+
+@pytest.mark.skipif(os.environ.get("MCPSUM_E2E_USERNS_RESTRICTED") != "1",
+                    reason="CI only: runs before the AppArmor profile is installed (ci.yml)")
+def test_I5_allowlist_fails_closed_under_ubuntu_userns_restriction(tmp_path):
+    lockp = lock_evil(tmp_path, "sandbox-probe")
+    add_sandbox_policy(lockp, {"network": {"allow": ["example.com:443"]}})
+    r = run("verify", "--lock", str(lockp))
+    assert r.returncode == 3, r
+    assert "apparmor_restrict_unprivileged_userns=1" in r.stderr and "userns," in r.stderr, r
 
 
 @pytest.mark.skipif(sys.platform.startswith("linux"), reason="checks the refusal on platforms without a backend")

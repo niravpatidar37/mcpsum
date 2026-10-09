@@ -10,6 +10,7 @@
 use std::io::{BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, SyncSender, TrySendError};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -17,10 +18,11 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 
 use crate::audit::{AppendAudit, AuditFile};
+use crate::egress::{system_resolver, Allowlist, AuditSink, Egress, EgressHandle, Limits};
 use crate::framing::{BoundedLines, Frame};
 use crate::lock::LockFile;
 use crate::monitor::{Action, AuditEvent, Decision, Dir, Monitor, Policy};
-use crate::process::{relay_stderr, spawn_server};
+use crate::process::{relay_stderr, spawn_server, ServerProcess};
 use crate::render::escape_untrusted;
 use crate::sandbox::{prepare, SandboxSpec};
 use crate::taint::{default_session, default_state_dir, TaintStore};
@@ -41,12 +43,44 @@ pub fn sandbox_summary(spec: &SandboxSpec) -> String {
     let abi = crate::sandbox_linux::landlock_abi();
     #[cfg(not(target_os = "linux"))]
     let abi = 0;
+    let net = match spec.net_allow.len() {
+        0 => "no network".to_string(),
+        n => format!(
+            "network only to {n} allowlisted destinations, through mcpsum's egress proxy (own network namespace)"
+        ),
+    };
     format!(
         "server starts under the I5 sandbox (fails closed if it cannot be applied): Landlock ABI {abi}, \
-         {} read paths, {} write paths, no network",
+         {} read paths, {} write paths, {net}",
         spec.read.len(),
         spec.write.len()
     )
+}
+
+/// How long the sandbox helper has to hand over the egress socket.
+const EGRESS_HANDOVER: Duration = Duration::from_secs(10);
+
+/// I5 allowlist mode: take the listening socket from the sandbox helper and
+/// serve the egress proxy on it (design 0002 §5.4). `None` without an
+/// allowlist. An error means the server's network could not be set up, and
+/// the caller must not use the server (it is killed when dropped).
+pub fn start_egress(child: &mut ServerProcess, spec: &SandboxSpec, audit: AuditSink) -> Result<Option<EgressHandle>> {
+    let Some(listener) = child.take_egress_listener(EGRESS_HANDOVER)? else {
+        return Ok(None);
+    };
+    let egress = Egress {
+        allow: Arc::new(Allowlist::parse(&spec.net_allow)?),
+        audit,
+        resolve: system_resolver(),
+        limits: Limits::default(),
+    };
+    Ok(Some(egress.serve(listener).context("starting the egress proxy")?))
+}
+
+/// Lock a shared audit file; a writer that panicked cannot have left a
+/// partial line (each append is one write), so the lock is still usable.
+fn locked(a: &Mutex<AuditFile>) -> MutexGuard<'_, AuditFile> {
+    a.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 enum Event {
@@ -120,7 +154,8 @@ pub fn run_proxy(
     let has_taint_policy = server.policy.as_ref().is_some_and(|p| p.taint.is_some());
     let taint_store = open_taint_store(has_taint_policy, session)?;
     let audit_path = audit_path.unwrap_or_else(|| default_audit_path(lock_path, name));
-    let mut audit = open_audit(&audit_path, name)?;
+    // Shared with the egress proxy's threads (I5 allowlist mode).
+    let audit = Arc::new(Mutex::new(open_audit(&audit_path, name)?));
     let max = policy.max_line_bytes;
     let mut monitor = Monitor::new(server.clone(), policy);
 
@@ -136,7 +171,7 @@ pub fn run_proxy(
                 reason: sandbox_summary(&prepared.spec),
                 args_digest: None,
             };
-            write_ahead(&mut audit, &[Action::Audit(ev)], name)?;
+            write_ahead(&mut *locked(&audit), &[Action::Audit(ev)], name)?;
             Some(prepared)
         }
         None => None,
@@ -148,6 +183,16 @@ pub fn run_proxy(
     )?;
     // Dropped at return, after the server tree is killed below: bounded drain.
     let _relay = relay_stderr(&mut child, name);
+    let _egress = match &sandbox {
+        Some(s) => {
+            let (shared, server) = (audit.clone(), name.to_string());
+            let sink: AuditSink = Arc::new(move |ev: &AuditEvent| {
+                write_ahead(&mut *locked(&shared), &[Action::Audit(ev.clone())], &server)
+            });
+            start_egress(&mut child, &s.spec, sink)?
+        }
+        None => None,
+    };
     let child_stdout = child.take_stdout().context("server stdout")?;
     let mut child_stdin = child.take_stdin().context("server stdin")?;
 
@@ -200,7 +245,7 @@ pub fn run_proxy(
         // Write-ahead audit (I8): every decision in this batch is appended to
         // the log before any of its effects happen. If the log cannot be
         // written, nothing in the batch is forwarded and the proxy stops.
-        if let Err(e) = write_ahead(&mut audit, &actions, name) {
+        if let Err(e) = write_ahead(&mut *locked(&audit), &actions, name) {
             fatal = Some(e);
             break 'events;
         }
@@ -228,7 +273,7 @@ pub fn run_proxy(
                                 reason: "server is not reading its input; proxy exiting".into(),
                                 args_digest: None,
                             };
-                            if let Err(e) = write_ahead(&mut audit, &[Action::Audit(e)], name) {
+                            if let Err(e) = write_ahead(&mut *locked(&audit), &[Action::Audit(e)], name) {
                                 fatal = Some(e);
                             }
                             exit_code = 1;

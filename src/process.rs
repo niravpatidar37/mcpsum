@@ -127,6 +127,10 @@ pub fn resolve_program(prog: &str) -> PathBuf {
 pub struct ServerProcess {
     child: Box<dyn ChildWrapper>,
     done: bool,
+    /// I5 allowlist mode: where the sandbox helper sends the egress proxy's
+    /// listening socket (see `sandbox_linux`).
+    #[cfg(target_os = "linux")]
+    egress: Option<std::os::unix::net::UnixStream>,
 }
 
 /// How long to wait for the tree to be gone after it has been killed.
@@ -143,6 +147,22 @@ impl ServerProcess {
 
     pub fn take_stderr(&mut self) -> Option<ChildStderr> {
         self.child.stderr().take()
+    }
+
+    /// I5 allowlist mode: wait up to `timeout` for the sandbox helper to hand
+    /// over the egress proxy's listening socket, which it created inside the
+    /// server's network namespace. `None` when the server has no allowlist.
+    pub fn take_egress_listener(&mut self, timeout: Duration) -> Result<Option<std::net::TcpListener>> {
+        #[cfg(target_os = "linux")]
+        if let Some(chan) = self.egress.take() {
+            use std::os::fd::AsFd;
+            chan.set_read_timeout(Some(timeout))?;
+            let fd = crate::sandbox_linux::recv_fd(chan.as_fd())
+                .context("the sandbox helper did not set up the server's network namespace (see its error above)")?;
+            return Ok(Some(fd.into()));
+        }
+        let _ = timeout;
+        Ok(None)
     }
 
     /// Give the server up to `grace` to exit on its own (call this after its
@@ -202,12 +222,24 @@ pub fn spawn_server(argv: &[String], passthrough: &[String], sandbox: Option<&Sa
                 resolved.clone().into_os_string(),
             ];
             a.extend(args.iter().map(OsString::from));
-            env.retain(|(k, _)| !matches!(k.to_str(), Some("TMPDIR" | "TMP" | "TEMP")));
+            let proxy = spec.proxy_env();
+            env.retain(|(k, _)| {
+                !matches!(k.to_str(), Some("TMPDIR" | "TMP" | "TEMP"))
+                    && !proxy.iter().any(|(p, _)| k.to_str() == Some(p))
+            });
             for k in ["TMPDIR", "TMP", "TEMP"] {
                 env.push((k.into(), spec.tmp.clone().into_os_string()));
             }
+            env.extend(proxy.into_iter().map(|(k, v)| (k.into(), v.into())));
             (me, a)
         }
+    };
+    // I5 allowlist mode: a socket pair whose far end the helper finds at
+    // EGRESS_FD, to send back the proxy's listening socket.
+    #[cfg(target_os = "linux")]
+    let egress = match sandbox.filter(|s| !s.no_network()) {
+        Some(_) => Some(std::os::unix::net::UnixStream::pair().context("creating the egress channel")?),
+        None => None,
     };
     let mut cmd = CommandWrap::with_new(&exe, |c| {
         c.args(&args)
@@ -216,6 +248,29 @@ pub fn spawn_server(argv: &[String], passthrough: &[String], sandbox: Option<&Sa
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        #[cfg(target_os = "linux")]
+        if let Some((_, theirs)) = &egress {
+            use std::os::fd::AsRawFd;
+            use std::os::unix::process::CommandExt;
+            let fd = theirs.as_raw_fd();
+            let target = crate::sandbox::EGRESS_FD;
+            // SAFETY: runs in the forked child before exec and calls only
+            // async-signal-safe functions (fcntl, dup2). The result has no
+            // FD_CLOEXEC, so exactly this descriptor reaches the helper.
+            unsafe {
+                c.pre_exec(move || {
+                    let r = if fd == target {
+                        libc::fcntl(fd, libc::F_SETFD, 0)
+                    } else {
+                        libc::dup2(fd, target)
+                    };
+                    if r < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+        }
     });
     #[cfg(unix)]
     cmd.wrap(ProcessGroup::leader());
@@ -224,7 +279,13 @@ pub fn spawn_server(argv: &[String], passthrough: &[String], sandbox: Option<&Sa
     let child = cmd
         .spawn()
         .with_context(|| format!("failed to start MCP server `{}`", resolved.display()))?;
-    Ok(ServerProcess { child, done: false })
+    Ok(ServerProcess {
+        child,
+        done: false,
+        // Our copy of the helper's end is dropped here: EOF once it exits.
+        #[cfg(target_os = "linux")]
+        egress: egress.map(|(ours, _theirs)| ours),
+    })
 }
 
 /// Longest server stderr line relayed; the rest is dropped (flood control).
