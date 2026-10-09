@@ -1,0 +1,68 @@
+name: reproducible
+
+# Builds each release binary twice with scripts/release-build.sh (the same
+# script release.yml uses), from two checkouts at different paths, with a
+# different HOME/CARGO_HOME/RUSTUP_HOME, time zone and start time, and fails if the
+# SHA-256 of the two binaries differs (issue #22).
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: reproducible-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rebuild:
+    name: reproducible (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-24.04, musl: true }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-24.04-arm, musl: true }
+          - { target: x86_64-pc-windows-msvc, os: windows-2025 }
+          - { target: aarch64-apple-darwin, os: macos-15 }
+          - { target: x86_64-apple-darwin, os: macos-15 }
+    env:
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: one
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: elsewhere/second-checkout
+          persist-credentials: false
+      - name: Install pinned toolchain and target
+        shell: bash
+        working-directory: one
+        run: |
+          rustup toolchain install
+          rustup target add "$TARGET"
+      - name: Install musl tools
+        if: matrix.musl
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools
+      - name: Build twice and compare
+        shell: bash
+        run: |
+          (cd one && bash scripts/release-build.sh "$TARGET")
+          other="$RUNNER_TEMP/other-home" # fresh HOME, CARGO_HOME and RUSTUP_HOME
+          (cd elsewhere/second-checkout &&
+            export HOME="$other" CARGO_HOME="$other/.cargo" RUSTUP_HOME="$other/.rustup" TZ=NZST-12 &&
+            rustup toolchain install && rustup target add "$TARGET" &&
+            bash scripts/release-build.sh "$TARGET")
+          exe=""; [ "$RUNNER_OS" = Windows ] && exe=".exe"
+          a="one/target/$TARGET/release/mcpsum$exe"
+          b="elsewhere/second-checkout/target/$TARGET/release/mcpsum$exe"
+          if command -v sha256sum > /dev/null; then sha256sum "$a" "$b"; else shasum -a 256 "$a" "$b"; fi
+          cmp "$a" "$b" || { echo "::error::$TARGET release binary is not reproducible"; exit 1; }

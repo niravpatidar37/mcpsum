@@ -145,11 +145,56 @@ def test_I3_server_initiated_requests_never_reach_client(tmp_path, client_factor
     assert "CLIENT_CAPS={}" in c.stderr  # sampling/elicitation/roots never advertised to the server
 
 
-def test_I3_modern_discover_is_denied_by_default(tmp_path, client_factory):
+def test_I3_discover_without_modern_meta_is_denied_by_default(tmp_path, client_factory):
     lockp = lock_evil(tmp_path, "clean")
     c = client_factory(lockp)
     r = c.request(1, "server/discover", {"protocolVersion": "2026-07-28"})
     assert r["error"]["code"] == METHOD_NOT_FOUND
+
+
+# ------------------------------------- 2026-07-28 modern clients (no initialize)
+
+MODERN = {"io.modelcontextprotocol/protocolVersion": "2026-07-28",
+          "io.modelcontextprotocol/clientCapabilities": {"elicitation": {}, "sampling": {}}}
+
+
+def test_I1_modern_discover_served_from_lock_server_discover_never_consulted(tmp_path, client_factory):
+    lockp = lock_evil(tmp_path, "clean")
+    c = client_factory(lockp)
+    r = c.request(1, "server/discover", {"_meta": MODERN})["result"]
+    assert r["supportedVersions"] == ["2026-07-28"]
+    assert r["instructions"] == "Arithmetic helper."
+    assert r["_meta"]["io.modelcontextprotocol/serverInfo"] == {"name": "evil-demo", "version": "1.0.0"}
+    assert "extensions" not in r["capabilities"]
+    call = c.request(2, "tools/call", {"name": "add", "arguments": {"a": 1, "b": 2}, "_meta": MODERN})
+    assert call["result"]["content"][0]["text"] == "3"
+    assert call["result"]["resultType"] == "complete"
+    bad = c.request(3, "tools/list", {"_meta": {"io.modelcontextprotocol/protocolVersion": "1900-01-01"}})
+    assert bad["error"]["code"] == -32022 and bad["error"]["data"]["supported"] == ["2026-07-28"]
+    assert "DISCOVER_CALLED" not in c.stderr
+    assert "CLIENT_CAPS={}" in c.stderr  # per-request client capabilities never reach the server
+    assert_clean(c)
+
+
+def test_I1_modern_client_after_rugpull_is_quarantined(tmp_path, client_factory):
+    poison = tmp_path / "poison"
+    lockp = lock_evil(tmp_path, "instructions", poison_file=poison)
+    poison.write_text("on")
+    c = client_factory(lockp)
+    r = c.request(1, "server/discover", {"_meta": MODERN})
+    assert r["result"]["instructions"] == "Arithmetic helper."
+    call = c.request(2, "tools/call", {"name": "add", "arguments": {"a": 1, "b": 2}, "_meta": MODERN})
+    assert call["error"]["code"] == QUARANTINED
+    assert_clean(c)
+
+
+def test_I3_input_required_result_is_refused(tmp_path, client_factory):
+    lockp = lock_evil(tmp_path, "mrtr")
+    c = client_factory(lockp)
+    c.initialize()
+    r = c.call(1, "add", {"a": 1, "b": 2})
+    assert "error" in r and "password" not in c.everything_received()
+    assert_clean(c)
 
 
 # ------------------------------------------------- I7: fail closed

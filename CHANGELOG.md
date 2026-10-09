@@ -7,6 +7,18 @@ All notable changes are recorded here. The format follows
 ## [Unreleased]
 
 ### Added
+- Reproducible release binaries (#22). `scripts/release-build.sh` (used by the release
+  workflow) remaps build paths and links with `/Brepro` (Windows) or `-S` (macOS); a new
+  `reproducible` workflow builds each of the 5 release targets twice in different directories
+  and homes and fails if the SHA-256 differs. `docs/RELEASING.md` shows how to rebuild a release and compare.
+- 2026-07-28 clients (#21). A request with `io.modelcontextprotocol/protocolVersion`
+  in `_meta` and no `initialize` starts a modern session: `server/discover` and the list
+  methods are answered from `mcp.lock` (with `resultType`, `ttlMs: 0`,
+  `cacheScope: "private"` and the locked `serverInfo`), and mcpsum opens a legacy session
+  to the server itself, with no client capabilities, verifying it before any call. Other
+  revisions get `-32022`. A result with `resultType` other than `complete` (a multi
+  round-trip input request) is refused with `-32001` in every session. Servers that speak
+  only 2026-07-28 are not supported yet.
 - I5 sandbox, opt-in, Linux (#14, design 0002). A `policy.sandbox` section in `mcp.lock`
   runs the server under Landlock (deny-by-default files: a runtime base, its own program
   and the listed paths; home directory not readable; mcpsum's files never writable) and
@@ -29,6 +41,9 @@ All notable changes are recorded here. The format follows
 - `mcpsum taint list` and `mcpsum taint reset` (needs a person at a terminal).
 - `mcpsum suggest-policy`: proposes labels from the server's own annotations, for review.
 - `mcpsum show` prints a server's taint policy.
+- Draft rules for a bypass challenge (`docs/CHALLENGE.md`, #18) and a local target
+  (`challenge/`) that locks the adversarial test server and reports any message that
+  should not have reached the client. Not launched yet.
 
 ## [0.1.1] - 2026-10-03
 
