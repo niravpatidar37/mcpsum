@@ -28,7 +28,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [monitor_session, lock_parse, framing, escape_untrusted]
+        target: [monitor_session, lock_parse, framing, escape_untrusted, egress_head]
     env:
       # cargo-fuzz needs nightly (sanitizers). Pinned to a dated nightly for
       # reproducibility; bump deliberately.

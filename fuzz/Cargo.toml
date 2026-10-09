@@ -47,3 +47,10 @@ path = "fuzz_targets/escape_untrusted.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "egress_head"
+path = "fuzz_targets/egress_head.rs"
+test = false
+doc = false
+bench = false

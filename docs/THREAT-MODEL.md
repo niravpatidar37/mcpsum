@@ -106,7 +106,8 @@ These are the risks that remain, from highest to lowest:
 ## Not yet assessed
 
 - Remote transports (Streamable HTTP, OAuth).
-- The 2026-07-28 protocol revision (`server/discover`); denied by default today.
+- Servers that speak only the 2026-07-28 revision (clients of that revision
+  are mediated; see [GUARANTEES.md](GUARANTEES.md#limits)).
 - Every client's handling of a quarantined server (only Claude Code has been
   checked by hand).
 - A formal model of the session state machine (TLA+ or Kani is on the roadmap).

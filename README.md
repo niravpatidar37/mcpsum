@@ -11,6 +11,10 @@
 </p>
 
 <p align="center">
+  <img alt="mcpsum locks a server, the server rug-pulls, verify shows the drift, and the proxy keeps serving the locked text and refuses the call" src="assets/demo/demo.gif" width="760">
+</p>
+
+<p align="center">
   <a href="https://github.com/niravpatidar37/mcpsum/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/niravpatidar37/mcpsum/actions/workflows/ci.yml/badge.svg?branch=main"></a>
   <a href="https://github.com/niravpatidar37/mcpsum/actions/workflows/fuzz.yml"><img alt="fuzz" src="https://github.com/niravpatidar37/mcpsum/actions/workflows/fuzz.yml/badge.svg?branch=main"></a>
   <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue"></a>
@@ -196,7 +200,9 @@ Read this before you rely on mcpsum. Details: [GUARANTEES.md § Limits](docs/GUA
   that a tool returns can still reach the model. With a taint policy (I6, opt-in) it can't
   silently trigger a sink on any server of the session, but an agent with its own unmediated
   shell tool can still bypass that.
-- **stdio only** for now. No remote/HTTP transport yet, and no 2026-07-28 `server/discover`.
+- **stdio only** for now. No remote/HTTP transport yet. 2026-07-28 clients work (mcpsum
+  answers `server/discover` from the lock), but the upstream server must still accept
+  `initialize`; see [Limits](docs/GUARANTEES.md#limits).
 
 ## How it is verified
 
