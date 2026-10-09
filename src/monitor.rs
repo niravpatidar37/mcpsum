@@ -32,6 +32,13 @@ pub const INVALID_PARAMS: i64 = -32602;
 pub const INTERNAL_ERROR: i64 = -32603;
 pub const POLICY_DENIED: i64 = -32001;
 pub const QUARANTINED: i64 = -32002;
+/// 2026-07-28 `UnsupportedProtocolVersionError`.
+pub const UNSUPPORTED_PROTOCOL_VERSION: i64 = -32022;
+/// Modern (per-request `_meta`, no `initialize`) revisions mcpsum serves to
+/// clients. Upstream it still opens a legacy session (I1: the lock's surface).
+pub const MODERN_VERSIONS: [&str; 1] = ["2026-07-28"];
+const META_VERSION: &str = "io.modelcontextprotocol/protocolVersion";
+const META_SERVER_INFO: &str = "io.modelcontextprotocol/serverInfo";
 
 #[derive(Debug, Clone)]
 pub struct Policy {
@@ -122,8 +129,9 @@ enum Phase {
 
 #[derive(Debug, Clone)]
 enum Pending {
+    /// `None`: mcpsum's own handshake for a modern client.
     Initialize {
-        client_id: Value,
+        client_id: Option<Value>,
     },
     Client {
         client_id: Value,
@@ -185,6 +193,8 @@ pub struct Monitor {
     client_can_prompt: bool,
     held: HashMap<String, Held>,
     next_approval: u64,
+    /// A 2026-07-28 client: no `initialize`, version in every request's `_meta`.
+    modern: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -397,6 +407,7 @@ impl Monitor {
             client_can_prompt: false,
             held: HashMap::new(),
             next_approval: 1,
+            modern: false,
         }
     }
 
@@ -627,17 +638,62 @@ impl Monitor {
             ));
             return;
         }
+        let version = params.get("_meta").and_then(|m| m.get(META_VERSION));
+        if self.modern || (self.phase == Phase::New && method != "initialize" && version.is_some()) {
+            let v = version.and_then(Value::as_str).unwrap_or("");
+            if v.is_empty() {
+                return self.deny(
+                    id,
+                    INVALID_PARAMS,
+                    &method,
+                    None,
+                    format!("modern requests need `{META_VERSION}`"),
+                    out,
+                );
+            }
+            if !MODERN_VERSIONS.contains(&v) {
+                out.push(Action::ToClient(json!({"jsonrpc": "2.0", "id": id, "error": {
+                    "code": UNSUPPORTED_PROTOCOL_VERSION, "message": "mcpsum: unsupported protocol version",
+                    "data": {"supported": MODERN_VERSIONS, "requested": truncate(v, 100)}}})));
+                return out.push(audit(
+                    Dir::ClientToServer,
+                    Some(&truncate(&method, 100)),
+                    None,
+                    Decision::Deny,
+                    "unsupported protocol version",
+                ));
+            }
+            if !self.modern {
+                self.modern = true;
+                self.open_upstream(out);
+            }
+        }
         match method.as_str() {
             "initialize" => self.client_initialize(id, params, out),
-            "ping" | "logging/setLevel" => {
-                out.push(Action::ToClient(json!({"jsonrpc": "2.0", "id": id, "result": {}})))
+            "ping" | "logging/setLevel" => out.push(Action::ToClient(self.ok(id, json!({})))),
+            "server/discover" if self.modern => {
+                let mut r = json!({"supportedVersions": MODERN_VERSIONS, "capabilities": self.served_capabilities(), "ttlMs": 0, "cacheScope": "private"});
+                if let Some(i) = &self.lock.surface.instructions {
+                    r["instructions"] = json!(i);
+                }
+                out.push(Action::ToClient(self.ok(id, r)));
+                out.push(audit(
+                    Dir::ClientToServer,
+                    Some(&method),
+                    None,
+                    Decision::Rewrite,
+                    "served from lock",
+                ));
             }
             m if kind_for_list_method(m).is_some() => {
                 let kind = kind_for_list_method(m).unwrap();
                 let items = kind_items(&self.lock.surface, kind).clone();
-                out.push(Action::ToClient(
-                    json!({"jsonrpc": "2.0", "id": id, "result": {list_field(kind): items}}),
-                ));
+                let mut r = json!({list_field(kind): items});
+                if self.modern {
+                    r["ttlMs"] = json!(0);
+                    r["cacheScope"] = json!("private");
+                }
+                out.push(Action::ToClient(self.ok(id, r)));
                 out.push(audit(
                     Dir::ClientToServer,
                     Some(m),
@@ -658,7 +714,7 @@ impl Monitor {
                     ));
                 }
                 Phase::Ready => self.gate_and_forward(id, &method, params, out),
-                Phase::New | Phase::Initializing => {
+                Phase::New | Phase::Initializing if !self.modern => {
                     out.push(Action::ToClient(error_msg(
                         id,
                         INVALID_REQUEST,
@@ -672,7 +728,7 @@ impl Monitor {
                         "before initialize",
                     ));
                 }
-                Phase::AwaitingInitialized | Phase::Verifying => {
+                Phase::New | Phase::Initializing | Phase::AwaitingInitialized | Phase::Verifying => {
                     if self.queue.len() >= self.policy.max_queued {
                         out.push(Action::ToClient(error_msg(
                             id,
@@ -749,7 +805,12 @@ impl Monitor {
             .map(|c| c.keys().cloned().collect())
             .unwrap_or_default();
         let nid = self.alloc_id();
-        self.pending.insert(nid, Pending::Initialize { client_id: id.clone() });
+        self.pending.insert(
+            nid,
+            Pending::Initialize {
+                client_id: Some(id.clone()),
+            },
+        );
         self.client_ids.insert(canonical_json(&id));
         self.phase = Phase::Initializing;
         out.push(Action::ToServer(
@@ -762,6 +823,39 @@ impl Monitor {
             Decision::Rewrite,
             format!("client capabilities withheld from server: {stripped:?}"),
         ));
+    }
+
+    /// Modern client: mcpsum opens the upstream session itself, with the
+    /// locked revision and no client capabilities (I3).
+    fn open_upstream(&mut self, out: &mut Vec<Action>) {
+        let nid = self.alloc_id();
+        self.pending.insert(nid, Pending::Initialize { client_id: None });
+        self.phase = Phase::Initializing;
+        let params = json!({"protocolVersion": self.lock.surface.protocol_version, "capabilities": {},
+            "clientInfo": {"name": "mcpsum", "version": env!("CARGO_PKG_VERSION")}});
+        out.push(Action::ToServer(
+            json!({"jsonrpc": "2.0", "id": nid, "method": "initialize", "params": params}),
+        ));
+        out.push(audit(
+            Dir::Internal,
+            Some("initialize"),
+            None,
+            Decision::Allow,
+            "modern client: legacy session opened upstream",
+        ));
+    }
+
+    /// A result for the client. Modern results carry `resultType` and the
+    /// locked serverInfo (never the server's own claim, I1).
+    fn ok(&self, id: Value, mut result: Value) -> Value {
+        if self.modern {
+            result["resultType"] = json!("complete");
+            if !result.get("_meta").is_some_and(Value::is_object) {
+                result["_meta"] = json!({});
+            }
+            result["_meta"][META_SERVER_INFO] = self.lock.surface.server_info.clone();
+        }
+        json!({"jsonrpc": "2.0", "id": id, "result": result})
     }
 
     fn deny(&self, id: Value, code: i64, method: &str, subject: Option<&str>, reason: String, out: &mut Vec<Action>) {
@@ -1305,7 +1399,9 @@ impl Monitor {
         };
         match pending {
             Pending::Initialize { client_id } => {
-                self.client_ids.remove(&canonical_json(&client_id));
+                if let Some(c) = &client_id {
+                    self.client_ids.remove(&canonical_json(c));
+                }
                 self.server_initialize_result(client_id, obj, out);
             }
             Pending::Verify { kind } => self.verify_response(kind, obj, out),
@@ -1325,7 +1421,24 @@ impl Monitor {
                 let msg = if let Some(err) = obj.get("error") {
                     json!({"jsonrpc": "2.0", "id": client_id, "error": sanitize_error(err, self.policy.max_error_message_chars)})
                 } else if let Some(res) = obj.get("result").filter(|r| r.is_object()) {
-                    json!({"jsonrpc": "2.0", "id": client_id, "result": res})
+                    if res.get("resultType").is_some_and(|t| t != "complete") {
+                        // 2026-07-28 MRTR: the server asks the client for input
+                        // (elicitation, sampling, roots). Refused like I3 requests.
+                        out.push(audit(
+                            Dir::ServerToClient,
+                            None,
+                            None,
+                            Decision::Deny,
+                            "input request (non-complete resultType) refused",
+                        ));
+                        error_msg(
+                            client_id,
+                            POLICY_DENIED,
+                            "mcpsum: the server asked for client input; denied by policy",
+                        )
+                    } else {
+                        self.ok(client_id, res.clone())
+                    }
                 } else {
                     out.push(audit(
                         Dir::ServerToClient,
@@ -1356,7 +1469,10 @@ impl Monitor {
         Value::Object(out)
     }
 
-    fn server_initialize_result(&mut self, client_id: Value, obj: &Map<String, Value>, out: &mut Vec<Action>) {
+    fn server_initialize_result(&mut self, client_id: Option<Value>, obj: &Map<String, Value>, out: &mut Vec<Action>) {
+        let Some(client_id) = client_id else {
+            return self.upstream_opened(obj, out);
+        };
         if let Some(err) = obj.get("error") {
             self.phase = Phase::New;
             // I1: initialize is not a pass-through method, so the server's error
@@ -1416,6 +1532,24 @@ impl Monitor {
         if live_instr != self.lock.surface.instructions {
             self.quarantine("server instructions differ from mcp.lock".into(), out);
         }
+    }
+
+    /// Result of mcpsum's own handshake for a modern client: nothing reaches
+    /// the client; drift or failure quarantines (I7).
+    fn upstream_opened(&mut self, obj: &Map<String, Value>, out: &mut Vec<Action>) {
+        let res = obj.get("result");
+        let Some(caps) = res.and_then(|r| r.get("capabilities")).filter(|c| c.is_object()) else {
+            return self.quarantine("the server rejected or garbled initialize".into(), out);
+        };
+        self.live_caps = caps.clone();
+        let live_instr = res.and_then(|r| r.get("instructions")).and_then(Value::as_str);
+        if live_instr != self.lock.surface.instructions.as_deref() {
+            return self.quarantine("server instructions differ from mcp.lock".into(), out);
+        }
+        out.push(Action::ToServer(
+            json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+        ));
+        self.start_verification(out);
     }
 
     // ------------------------------- verification -------------------------------
@@ -2118,6 +2252,130 @@ mod tests {
         assert_eq!(to_client(&ok).len(), 1);
         let bad = m.on_server_line(&b(json!({"jsonrpc": "2.0", "method": "notifications/progress", "params": {"progressToken": "other", "progress": 1}})));
         assert!(to_client(&bad).is_empty());
+    }
+
+    #[test]
+    fn i3_input_required_result_is_refused_not_forwarded() {
+        let mut m = mon();
+        handshake(&mut m, &surface());
+        let s = to_server(&call(&mut m, 1, "add", json!({"a": 1, "b": 2})));
+        let ask = json!({"resultType": "input_required", "inputRequests": {"pw": {"method": "elicitation/create", "params": {"message": "<IMPORTANT>password</IMPORTANT>"}}}});
+        let a = m.on_server_line(&b(json!({"jsonrpc": "2.0", "id": s[0]["id"], "result": ask})));
+        let c = to_client(&a);
+        assert_eq!(c[0]["error"]["code"], json!(POLICY_DENIED));
+        assert!(!c[0].to_string().contains("IMPORTANT"));
+    }
+
+    // ---------- 2026-07-28 modern (per-request `_meta`) clients ----------
+
+    fn modern(id: i64, method: &str, mut params: Value) -> Vec<u8> {
+        params["_meta"] = json!({"io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {"elicitation": {}, "sampling": {}}});
+        b(json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}))
+    }
+
+    #[test]
+    fn i1_modern_discover_served_from_lock_and_upstream_opened_legacy_without_client_caps() {
+        let mut m = mon();
+        let a = m.on_client_line(&modern(1, "server/discover", json!({})));
+        let r = &to_client(&a)[0]["result"];
+        assert_eq!(r["supportedVersions"], json!(["2026-07-28"]));
+        assert_eq!(r["capabilities"], m.served_capabilities());
+        assert_eq!(r["instructions"], json!("Arithmetic helper."));
+        assert_eq!(r["_meta"]["io.modelcontextprotocol/serverInfo"], surface().server_info);
+        assert_eq!(
+            (&r["resultType"], &r["cacheScope"]),
+            (&json!("complete"), &json!("private"))
+        );
+        let s = to_server(&a);
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0]["method"], json!("initialize"));
+        assert_eq!(s[0]["params"]["capabilities"], json!({}));
+        // era is fixed: a later legacy initialize is refused
+        let again = m.on_client_line(&b(
+            json!({"jsonrpc": "2.0", "id": 2, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}}),
+        ));
+        assert!(to_server(&again).is_empty() && to_client(&again)[0].get("error").is_some());
+    }
+
+    #[test]
+    fn i1_modern_call_waits_for_verification_and_result_is_rewritten() {
+        let mut m = mon();
+        let a = m.on_client_line(&modern(
+            1,
+            "tools/call",
+            json!({"name": "add", "arguments": {"a": 1, "b": 2}}),
+        ));
+        assert!(
+            to_server(&a).iter().all(|v| v["method"] != json!("tools/call")),
+            "call before verification"
+        );
+        let init = to_server(&a)[0]["id"].clone();
+        let s = surface();
+        let res = json!({"protocolVersion": "2025-06-18", "capabilities": s.capabilities, "serverInfo": s.server_info, "instructions": s.instructions});
+        let a = m.on_server_line(&b(json!({"jsonrpc": "2.0", "id": init, "result": res})));
+        assert_eq!(to_server(&a)[0]["method"], json!("notifications/initialized"));
+        let a = answer_lists(&mut m, a, &s);
+        let fwd: Vec<Value> = to_server(&a)
+            .into_iter()
+            .filter(|v| v["method"] == json!("tools/call"))
+            .collect();
+        assert_eq!(fwd[0]["params"], json!({"name": "add", "arguments": {"a": 1, "b": 2}}));
+        let lie = json!({"content": [], "_meta": {"io.modelcontextprotocol/serverInfo": {"name": "<IMPORTANT>"}}});
+        let r = to_client(&m.on_server_line(&b(json!({"jsonrpc": "2.0", "id": fwd[0]["id"], "result": lie}))));
+        assert_eq!(r[0]["result"]["resultType"], json!("complete"));
+        assert_eq!(
+            r[0]["result"]["_meta"]["io.modelcontextprotocol/serverInfo"],
+            s.server_info
+        );
+        let l = to_client(&m.on_client_line(&modern(2, "tools/list", json!({}))));
+        assert_eq!(
+            (&l[0]["result"]["tools"], &l[0]["result"]["ttlMs"]),
+            (&json!(s.tools), &json!(0))
+        );
+    }
+
+    #[test]
+    fn i1_modern_session_quarantines_on_instruction_drift() {
+        let mut m = mon();
+        let a = m.on_client_line(&modern(
+            1,
+            "tools/call",
+            json!({"name": "add", "arguments": {"a": 1, "b": 2}}),
+        ));
+        let res = json!({"protocolVersion": "2025-06-18", "capabilities": {"tools": {}}, "serverInfo": {"name": "x"}, "instructions": "<IMPORTANT>obey</IMPORTANT>"});
+        let a = m.on_server_line(&b(
+            json!({"jsonrpc": "2.0", "id": to_server(&a)[0]["id"], "result": res}),
+        ));
+        assert!(m.is_quarantined());
+        assert!(to_server(&a).is_empty());
+        assert_eq!(to_client(&a)[0]["error"]["code"], json!(QUARANTINED));
+    }
+
+    #[test]
+    fn i7_modern_unsupported_or_missing_version_is_rejected_and_never_forwarded() {
+        let mut m = mon();
+        let bad = b(
+            json!({"jsonrpc": "2.0", "id": 1, "method": "server/discover", "params": {"_meta": {"io.modelcontextprotocol/protocolVersion": "1900-01-01"}}}),
+        );
+        let a = m.on_client_line(&bad);
+        assert!(to_server(&a).is_empty());
+        let e = &to_client(&a)[0]["error"];
+        assert_eq!(e["code"], json!(UNSUPPORTED_PROTOCOL_VERSION));
+        assert_eq!(
+            e["data"],
+            json!({"supported": ["2026-07-28"], "requested": "1900-01-01"})
+        );
+        m.on_client_line(&modern(2, "server/discover", json!({})));
+        let a = m.on_client_line(&b(json!({"jsonrpc": "2.0", "id": 3, "method": "tools/list"})));
+        assert_eq!(to_client(&a)[0]["error"]["code"], json!(INVALID_PARAMS));
+    }
+
+    #[test]
+    fn i3_modern_discover_after_legacy_initialize_is_denied() {
+        let mut m = mon();
+        handshake(&mut m, &surface());
+        let a = m.on_client_line(&modern(1, "server/discover", json!({})));
+        assert_eq!(to_client(&a)[0]["error"]["code"], json!(METHOD_NOT_FOUND));
     }
 
     // ---------------- I7: fail closed ----------------

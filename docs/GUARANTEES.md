@@ -32,7 +32,10 @@ nightly.
 **Statement.** After approval, no definition text written by the server reaches
 the client. `tools/list`, `prompts/list`, `resources/list`,
 `resources/templates/list`, `serverInfo`, `instructions` and the advertised
-capabilities are answered from `mcp.lock`. The live server is asked for its
+capabilities are answered from `mcp.lock`. For a 2026-07-28 client (no
+`initialize`, version in each request's `_meta`), so is `server/discover`,
+and every result carries the locked `serverInfo`; the server's own
+`server/discover` is never consulted. The live server is asked for its
 definitions only to *compare* them with the lock. On any definitional
 difference the server is quarantined, and every later request is refused with
 `-32002`.
@@ -57,8 +60,12 @@ monitor never forwards one.
 `i1_list_changed_is_not_forwarded_and_triggers_reverification`,
 `i1_verification_follows_pagination`, `i1_verification_timeout_quarantines`,
 `i1_method_not_found_on_verification_list_counts_as_empty`,
-`i1_served_capabilities_never_advertise_list_changed_logging_or_completions`.
-e2e: `test_I1_rugpull_between_sessions_never_reaches_model_and_quarantines`,
+`i1_served_capabilities_never_advertise_list_changed_logging_or_completions`,
+`i1_modern_discover_served_from_lock_and_upstream_opened_legacy_without_client_caps`,
+`i1_modern_call_waits_for_verification_and_result_is_rewritten`,
+`i1_modern_session_quarantines_on_instruction_drift`.
+e2e: `test_I1_modern_discover_served_from_lock_server_discover_never_consulted`,
+`test_I1_modern_client_after_rugpull_is_quarantined`, `test_I1_rugpull_between_sessions_never_reaches_model_and_quarantines`,
 `test_I1_inline_rugpull_after_list_changed_quarantines`,
 `test_I1_poisoned_instructions_never_reach_client`,
 `test_I1_full_schema_poisoning_is_detected`.
@@ -95,15 +102,21 @@ Property: invariant I2, checked against a hand-written schema oracle.
 **Statement.** Only the methods mcpsum understands are allowed. In addition
 to the methods above, the client may send `initialize`,
 `notifications/initialized`, `ping`, `logging/setLevel` and
-`notifications/cancelled`. Everything else from the client is refused with
-`-32601`.
+`notifications/cancelled`, and a 2026-07-28 client `server/discover`.
+Everything else from the client (including `subscriptions/listen` and the
+tasks extension) is refused with `-32601`. A modern request for a revision
+other than 2026-07-28 gets `-32022` (`UnsupportedProtocolVersionError`).
 
 From the server, **no request is ever forwarded** to the client:
 `sampling/createMessage`, `elicitation/create`, `roots/list` and unknown
 methods are refused, and `ping` is answered locally. The only server
 notification forwarded is `notifications/progress`, for a token the client
 issued. The client's `sampling`, `elicitation` and `roots` capabilities are
-withheld from the server during `initialize`.
+withheld from the server during `initialize`; for a 2026-07-28 client mcpsum
+opens the upstream session itself, with no client capabilities, and never
+forwards per-request `_meta`. A 2026-07-28 *input request* (a result with
+`resultType` other than `complete`, which carries elicitation, sampling or
+roots requests) is refused with `-32001`.
 
 **Why it matters.** Sampling lets a server put its own prompt in front of
 your model. Elicitation lets it ask your user for data directly. Roots reveal
@@ -115,7 +128,12 @@ cannot use them.
 `i3_server_ping_answered_locally`, `i3_progress_forwarded_only_for_known_token`,
 `i3_unknown_client_method_denied_and_logging_notifications_dropped`.
 e2e: `test_I3_server_initiated_requests_never_reach_client`,
-`test_I3_modern_discover_is_denied_by_default`. Property: invariant I3.
+`test_I3_discover_without_modern_meta_is_denied_by_default`,
+`test_I3_input_required_result_is_refused`;
+unit: `i3_input_required_result_is_refused_not_forwarded`,
+`i3_modern_discover_after_legacy_initialize_is_denied`,
+`i7_modern_unsupported_or_missing_version_is_rejected_and_never_forwarded`.
+Property: invariant I3, also from a session a modern client opened.
 
 ## I5 — The server process is sandboxed (opt-in, Linux, no network)
 
@@ -378,6 +396,14 @@ What mcpsum does **not** protect against today:
 6. **Bugs in mcpsum.** The trusted core is small, written in Rust, property
    tested and fuzzed. That reduces the risk; it does not eliminate it. Please
    report bypasses: see [SECURITY.md](../SECURITY.md).
-7. **Remote (HTTP) transports and the 2026-07-28 protocol revision**
-   (`server/discover`) are not supported yet. mcpsum speaks stdio, with
-   protocol revisions up to 2025-11-25, and denies `server/discover`.
+7. **Protocol revisions.** mcpsum speaks stdio only (no HTTP transport).
+   Clients may use revisions up to 2025-11-25 (`initialize`) or
+   [2026-07-28](https://modelcontextprotocol.io/specification/2026-07-28/changelog)
+   (per-request `_meta`, [`server/discover`](https://modelcontextprotocol.io/specification/2026-07-28/server/discover)).
+   Upstream, mcpsum always opens a legacy `initialize` session at the locked
+   revision, so a server that speaks *only* 2026-07-28 cannot be locked or
+   proxied yet. The new 2026-07-28 features are denied: multi round-trip
+   input requests, `subscriptions/listen`, the tasks extension and
+   capability `extensions`. mcpsum's approval prompt (I6) is a
+   server-initiated request, which 2026-07-28 clients do not take, so a
+   tainted sink call from such a client is refused, not held.

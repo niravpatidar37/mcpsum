@@ -124,6 +124,8 @@ enum ClientOp {
     Unknown(String),
     Cancel(i64),
     Ping,
+    /// A 2026-07-28 request: no `initialize`, version in `_meta`.
+    Modern(&'static str),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -164,6 +166,8 @@ enum Payload {
     Poisoned,
     Error,
     Malformed,
+    /// 2026-07-28 multi round-trip: the server asks the client for input.
+    InputRequired,
 }
 
 fn arb_value() -> impl Strategy<Value = Value> {
@@ -206,11 +210,12 @@ fn arb_client() -> impl Strategy<Value = ClientOp> {
         1 => prop_oneof![Just("completion/complete".to_string()), Just("server/discover".to_string()), Just("x/y".to_string())].prop_map(ClientOp::Unknown),
         1 => (0i64..40).prop_map(ClientOp::Cancel),
         1 => Just(ClientOp::Ping),
+        2 => prop_oneof![Just("server/discover"), Just("tools/call"), Just("tools/list")].prop_map(ClientOp::Modern),
     ]
 }
 
 fn arb_payload() -> impl Strategy<Value = Payload> {
-    prop_oneof![5 => Just(Payload::Clean), 2 => Just(Payload::Poisoned), 1 => Just(Payload::Error), 1 => Just(Payload::Malformed)]
+    prop_oneof![5 => Just(Payload::Clean), 2 => Just(Payload::Poisoned), 1 => Just(Payload::Error), 1 => Just(Payload::Malformed), 1 => Just(Payload::InputRequired)]
 }
 
 fn arb_server() -> impl Strategy<Value = ServerOp> {
@@ -340,6 +345,9 @@ impl Harness {
                 )
             }
             (Payload::Malformed, _) => json!(EVIL),
+            (Payload::InputRequired, _) => {
+                json!({"resultType": "input_required", "inputRequests": {"x": {"method": "elicitation/create", "params": {"message": EVIL}}}})
+            }
             (Payload::Clean, "initialize") => {
                 json!({"protocolVersion": "2025-06-18", "capabilities": s.capabilities, "serverInfo": s.server_info, "instructions": s.instructions})
             }
@@ -423,6 +431,14 @@ impl Harness {
                     self.m.on_client_line(&serde_json::to_vec(&msg).unwrap())
                 }
                 ClientOp::Ping => self.client_request("ping", json!({})),
+                ClientOp::Modern(m) => {
+                    let mut params = match *m {
+                        "tools/call" => json!({"name": "add", "arguments": {"a": 1, "b": 2}}),
+                        _ => json!({}),
+                    };
+                    params["_meta"] = json!({"io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {"elicitation": {}}});
+                    self.client_request(m, params)
+                }
             },
             Op::Server(s) => match s {
                 ServerOp::Respond { k, payload } => self.respond(*k, payload),
@@ -527,6 +543,9 @@ impl Harness {
                     prop_assert!(method.is_some(), "response for unknown id {k}: {text}");
                     self.answered.insert(k);
                     let method = method.unwrap();
+                    // I3: a 2026-07-28 input request never reaches the client.
+                    let rt = &v["result"]["resultType"];
+                    prop_assert!(rt.is_null() || rt == "complete", "input request reached client: {text}");
                     // I1: server text only in pass-through responses.
                     if !matches!(method.as_str(), "tools/call" | "prompts/get" | "resources/read") {
                         prop_assert!(!text.contains(EVIL), "server text in `{method}` response: {text}");
@@ -595,6 +614,18 @@ proptest! {
     fn invariants_hold_after_clean_handshake(ops in proptest::collection::vec(arb_op(), 1..60)) {
         let mut h = Harness::new();
         clean_handshake_then(&mut h, &ops)?;
+    }
+
+    /// The same, after a 2026-07-28 client opened the session (no initialize).
+    #[test]
+    fn invariants_hold_after_modern_discover(ops in proptest::collection::vec(arb_op(), 1..60)) {
+        let mut h = Harness::new();
+        let mut script = vec![Op::Client(ClientOp::Modern("server/discover"))];
+        script.extend((0..5).map(|_| Op::Server(ServerOp::Respond { k: 0, payload: Payload::Clean })));
+        for op in script.iter().chain(ops.iter()) {
+            let actions = h.apply(op);
+            h.check(&actions)?;
+        }
     }
 
     /// I6: the same adversarial sessions under a taint policy.
