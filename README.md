@@ -11,7 +11,8 @@
 </p>
 
 <p align="center">
-  <img alt="mcpsum locks a server, the server rug-pulls, verify shows the drift, and the proxy keeps serving the locked text and refuses the call" src="assets/demo/demo.gif" width="760">
+  <img alt="Terminal recording: mcpsum locks an MCP server; an update swaps in a poisoned add tool that asks for ~/.ssh/id_rsa; mcpsum verify reports DRIFT with the hidden characters visible; through the proxy the model still sees the locked description and the call is refused; the hash-chained audit log verifies." src="assets/demo/demo.gif" width="760">
+  <br><sub>A real session against the adversarial test server in this repo. <a href="assets/demo/README.md">How it was recorded</a>.</sub>
 </p>
 
 <p align="center">

@@ -1656,7 +1656,7 @@ impl Monitor {
         let drift: Vec<String> = changes
             .iter()
             .filter(|c| c.is_definitional())
-            .map(|c| format!("{c:?}"))
+            .map(|c| c.to_string())
             .collect();
         if !drift.is_empty() {
             return self.quarantine(format!("definition drift: {}", truncate(&drift.join(", "), 500)), out);

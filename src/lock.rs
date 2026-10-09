@@ -262,6 +262,23 @@ impl Change {
     }
 }
 
+/// One-line summary for logs and quarantine reasons, e.g. `tool "add" changed`.
+/// The key comes from the server, so it is Debug-quoted: control and format
+/// characters are escaped, never written raw.
+impl std::fmt::Display for Change {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Change::Added { kind, key } => write!(f, "{} {key:?} added", kind.label()),
+            Change::Removed { kind, key } => write!(f, "{} {key:?} removed", kind.label()),
+            Change::Changed { kind, key } => write!(f, "{} {key:?} changed", kind.label()),
+            Change::InstructionsChanged => f.write_str("instructions changed"),
+            Change::ServerInfoChanged => f.write_str("serverInfo changed"),
+            Change::CapabilitiesChanged => f.write_str("capabilities changed"),
+            Change::ProtocolVersionChanged => f.write_str("protocol version changed"),
+        }
+    }
+}
+
 fn items(surface: &Surface, kind: Kind) -> &Vec<Value> {
     match kind {
         Kind::Tool => &surface.tools,
@@ -630,6 +647,24 @@ pub(crate) mod tests {
                 key: "add".into()
             }]
         );
+    }
+
+    #[test]
+    fn change_display_is_readable_and_escapes_the_key() {
+        let c = Change::Changed {
+            kind: Kind::Tool,
+            key: "add".into(),
+        };
+        assert_eq!(c.to_string(), "tool \"add\" changed");
+        assert_eq!(Change::InstructionsChanged.to_string(), "instructions changed");
+        // The key is server-controlled: newlines and bidi overrides are escaped.
+        let c = Change::Added {
+            kind: Kind::ResourceTemplate,
+            key: "x\n\u{202e}y".into(),
+        };
+        let s = c.to_string();
+        assert!(s.starts_with("resource template \""), "{s}");
+        assert!(!s.contains('\n') && !s.contains('\u{202e}'), "{s:?}");
     }
 
     #[test]
