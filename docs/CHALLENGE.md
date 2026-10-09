@@ -1,7 +1,6 @@
 # Bypass challenge
 
-- **Status:** draft rules (issue #18). Not launched or announced; the owner
-  decides when.
+- **Status:** open since 2026-10-08 (issue #18).
 - **Target:** [`challenge/`](../challenge/README.md), a runnable setup for your
   own machine.
 
@@ -76,8 +75,8 @@ GitHub security advisory and credit (unless you prefer otherwise), as in
 [SECURITY.md](../SECURITY.md). Rules may be clarified over time; a bypass is
 judged by the rules in force when it was reported.
 
-*Owner to decide: rewards.* There are no cash prizes or other rewards unless
-the owner adds them here.
+There are no cash prizes. Confirmed bypasses get the advisory, the credit and a
+place in the hall of fame below.
 
 ## Hall of fame
 
