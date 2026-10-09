@@ -33,6 +33,9 @@ All notable changes are recorded here. The format follows
 - `mcpsum taint list` and `mcpsum taint reset` (needs a person at a terminal).
 - `mcpsum suggest-policy`: proposes labels from the server's own annotations, for review.
 - `mcpsum show` prints a server's taint policy.
+- Draft rules for a bypass challenge (`docs/CHALLENGE.md`, #18) and a local target
+  (`challenge/`) that locks the adversarial test server and reports any message that
+  should not have reached the client. Not launched yet.
 
 ## [0.1.1] - 2026-10-03
 

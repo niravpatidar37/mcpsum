@@ -130,7 +130,7 @@ claude mcp add time -- mcpsum proxy --lock /abs/path/mcp.lock --name time
 ```
 </details>
 
-<details><summary><b>VS Code</b>: <code>.vscode/mcp.json</code></summary>
+<details><summary><b>VS Code</b> (start and drift checked): <code>.vscode/mcp.json</code></summary>
 
 ```json
 {
@@ -141,7 +141,7 @@ claude mcp add time -- mcpsum proxy --lock /abs/path/mcp.lock --name time
 ```
 </details>
 
-<details><summary><b>Claude Desktop</b>: <code>claude_desktop_config.json</code></summary>
+<details><summary><b>Claude Desktop</b> (checked by hand): <code>claude_desktop_config.json</code></summary>
 
 ```json
 {
@@ -152,8 +152,12 @@ claude mcp add time -- mcpsum proxy --lock /abs/path/mcp.lock --name time
 ```
 </details>
 
-The Cursor, VS Code and Claude Desktop formats follow each client's documentation but have
-not been tested end to end yet. Reports are welcome.
+Claude Desktop 2.19675 on Windows was checked end to end: tools served from the lock, a tool
+call allowed, a drifted server quarantined, audit chain verified. The Microsoft Store build
+reads its config from `%LOCALAPPDATA%\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming\Claude\`,
+not `%APPDATA%\Claude\`. VS Code 1.140 starts the proxy and gets quarantined on drift; it only
+runs servers in a trusted folder. A tool call from VS Code and the Cursor format are not
+verified yet ([#13](https://github.com/niravpatidar37/mcpsum/issues/13)). Reports are welcome.
 
 **3. Check for drift in CI.**
 
@@ -237,7 +241,8 @@ More detail: [threat model](docs/THREAT-MODEL.md) · [lockfile format](docs/LOCK
 ## Contributing and security
 
 Found a bypass? Please report it privately: see [SECURITY.md](SECURITY.md). Bypasses are
-the most valuable contributions this project can get. For everything else, see
+the most valuable contributions this project can get. To try, the
+[bypass challenge](docs/CHALLENGE.md) has win conditions and a local target. For everything else, see
 [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License

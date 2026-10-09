@@ -4,6 +4,7 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .mcpsum-audit/
+challenge/.work/
 
 # brand build cache (font archive is fetched + checksum-verified)
 assets/brand/tools/.cache/
