@@ -201,12 +201,16 @@ pub fn is_public(ip: IpAddr) -> bool {
     if s[0] == 0x2002 {
         return is_public_v4(embedded(s[1], s[2])); // 6to4
     }
+    if s[..6] == [0, 0, 0, 0, 0xffff, 0] {
+        return is_public_v4(embedded(s[6], s[7])); // IPv4-translated (RFC 6145)
+    }
     !(s[..6] == [0; 6] // ::, ::1 and IPv4-compatible
         || v6.is_multicast()
         || (s[0] & 0xfe00) == 0xfc00 // unique local
         || (s[0] & 0xffc0) == 0xfe80 // link-local
         || (s[0] & 0xffc0) == 0xfec0 // site-local (deprecated)
         || (s[0] == 0x2001 && (s[1] == 0 || s[1] == 0xdb8)) // Teredo, documentation
+        || s[..3] == [0x64, 0xff9b, 1] // local-use NAT64 (RFC 8215): may embed private IPv4
         || s[..4] == [0x100, 0, 0, 0]) // discard-only
 }
 
@@ -624,6 +628,9 @@ mod tests {
             "2001:db8::1",
             "2001::1",
             "::127.0.0.1",
+            "::ffff:0:a00:1",     // IPv4-translated 10.0.0.1 (RFC 6145)
+            "::ffff:0:a9fe:a9fe", // IPv4-translated 169.254.169.254
+            "64:ff9b:1::a00:1",   // local-use NAT64 (RFC 8215)
         ] {
             assert!(!is_public(ip.parse().unwrap()), "{ip}");
         }
