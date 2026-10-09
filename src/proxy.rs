@@ -324,13 +324,7 @@ fn write_ahead<A: AppendAudit>(audit: &mut A, actions: &[Action], name: &str) ->
     for a in actions {
         if let Action::Audit(e) = a {
             if matches!(e.decision, Decision::Deny | Decision::Quarantine) {
-                eprintln!(
-                    "mcpsum[{name}]: {:?} {} {}: {}",
-                    e.decision,
-                    escape_untrusted(e.method.as_deref().unwrap_or("-")),
-                    escape_untrusted(e.subject.as_deref().unwrap_or("")),
-                    escape_untrusted(&e.reason)
-                );
+                eprintln!("mcpsum[{name}]: {}", decision_line(e));
             }
             audit
                 .append_event(e, unix_ms())
@@ -338,6 +332,23 @@ fn write_ahead<A: AppendAudit>(audit: &mut A, actions: &[Action], name: &str) ->
         }
     }
     Ok(())
+}
+
+/// The stderr line for a deny or quarantine, e.g.
+/// `Deny tools/call "add": arguments rejected by locked schema`.
+/// Absent fields are left out; every server-influenced field is escaped.
+fn decision_line(e: &AuditEvent) -> String {
+    let mut line = format!("{:?}", e.decision);
+    if let Some(m) = e.method.as_deref().filter(|m| !m.is_empty()) {
+        line.push(' ');
+        line.push_str(&escape_untrusted(m));
+    }
+    if let Some(s) = e.subject.as_deref().filter(|s| !s.is_empty()) {
+        line.push_str(&format!(" \"{}\"", escape_untrusted(s)));
+    }
+    line.push_str(": ");
+    line.push_str(&escape_untrusted(&e.reason));
+    line
 }
 
 fn spawn_reader<R: std::io::Read + Send + 'static>(
@@ -366,6 +377,47 @@ fn spawn_reader<R: std::io::Read + Send + 'static>(
 mod tests {
     use super::*;
     use crate::audit::{verify_chain, AuditLog};
+
+    fn event(method: Option<&str>, subject: Option<&str>, decision: Decision, reason: &str) -> AuditEvent {
+        AuditEvent {
+            dir: Dir::ClientToServer,
+            method: method.map(str::to_string),
+            subject: subject.map(str::to_string),
+            decision,
+            reason: reason.into(),
+            args_digest: None,
+        }
+    }
+
+    #[test]
+    fn decision_line_omits_absent_fields() {
+        let e = event(Some("tools/call"), Some("add"), Decision::Deny, "arguments rejected");
+        assert_eq!(decision_line(&e), "Deny tools/call \"add\": arguments rejected");
+        let e = event(Some("tools/call"), None, Decision::Deny, "server quarantined");
+        assert_eq!(decision_line(&e), "Deny tools/call: server quarantined");
+        let e = event(
+            None,
+            None,
+            Decision::Quarantine,
+            "definition drift: tool \"add\" changed",
+        );
+        assert_eq!(decision_line(&e), "Quarantine: definition drift: tool \"add\" changed");
+    }
+
+    #[test]
+    fn decision_line_escapes_server_text() {
+        // A tool name with a terminal escape and a bidi override must not reach stderr raw.
+        let e = event(
+            Some("tools/call"),
+            Some("a\u{1b}[2J\u{202e}b"),
+            Decision::Deny,
+            "r\u{1b}]52;c;x\u{7}",
+        );
+        let line = decision_line(&e);
+        assert!(!line.contains('\u{1b}'), "{line:?}");
+        assert!(!line.contains('\u{202e}'), "{line:?}");
+        assert!(!line.contains('\u{7}'), "{line:?}");
+    }
 
     /// A writer that fails, like a full disk.
     struct FailingWriter;

@@ -53,6 +53,15 @@ All notable changes are recorded here. The format follows
 - Draft rules for a bypass challenge (`docs/CHALLENGE.md`, #18) and a local target
   (`challenge/`) that locks the adversarial test server and reports any message that
   should not have reached the client. Not launched yet.
+- README demo recording (`assets/demo/demo.gif`): a real asciinema session against the
+  adversarial test server (lock, rug pull, `DRIFT`, refused call, audit log). The cast, the
+  script, the client and the framing script are in `assets/demo/` to re-record it.
+
+### Changed
+- Proxy stderr is easier to read. Deny and quarantine lines now look like
+  `mcpsum[calc]: Quarantine: definition drift: tool "add" changed` instead of Rust debug
+  output. The method, tool name and reason are still escaped, so a server cannot write
+  terminal escape sequences or bidi overrides to your terminal. The audit log format is unchanged.
 
 ## [0.1.1] - 2026-10-03
 
