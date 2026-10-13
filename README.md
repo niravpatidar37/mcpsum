@@ -190,8 +190,9 @@ Read this before you rely on mcpsum. Details: [GUARANTEES.md § Limits](docs/GUA
 - **It trusts what you approve.** A definition that was poisoned when you locked it is
   served faithfully. `lock` flags hidden characters, injection markers and cross-server
   shadowing, but that check is a heuristic. Read the diff.
-- **The sandbox is opt-in and Linux-only, with no network allowlists yet.** Without
-  `policy.sandbox` (and on macOS/Windows), the server runs with your user's permissions.
+- **The sandbox is opt-in and Linux-only.** Without `policy.sandbox`, the server runs with
+  your user's permissions. On macOS and Windows, a server *with* `policy.sandbox` does not
+  start (fail closed). TLS through the egress allowlist is not inspected.
   The first malicious MCP server found in the wild, `postmark-mcp`, BCC'd emails through
   its own legitimate API without changing its tool definitions
   ([Koi Security](https://www.koi.security/blog/postmark-mcp-npm-malicious-backdoor-email-theft)).
@@ -207,29 +208,33 @@ Read this before you rely on mcpsum. Details: [GUARANTEES.md § Limits](docs/GUA
 
 ## How it is verified
 
-- **75 unit tests** across the monitor, lockfile, audit log, framing, rendering, process and proxy.
-- **Property tests**: 6,000 random adversarial sessions per run, checked after every
+- **130+ unit tests** (134 on Windows, 137 on Linux, where the sandbox layers are tested too)
+  across the monitor, lockfile, audit log, framing, rendering, sandbox, egress proxy, process
+  and proxy.
+- **Property tests**: 12,000 random adversarial sessions per run, checked after every
   step against an independent oracle. The first run found a real I1 gap, which was then
   fixed (#4).
 - **Adversarial e2e suite**: the real binary against a [malicious MCP server](e2e/servers/evil_server.py)
-  with 13 behaviour modes (rug pulls, schema smuggling, poisoned instructions, sampling,
-  elicitation, spoofed ids, garbage, env theft, a wedged pipe, terminal escapes…), on Linux
-  and Windows.
+  with 17 behaviour modes (rug pulls, schema smuggling, poisoned instructions, sampling,
+  elicitation, spoofed ids, garbage, env theft, a wedged pipe, terminal escapes, version
+  bumps, process forks, taint, sandbox and egress escapes, multi round-trip input
+  requests): 41 test cases on Linux and Windows.
 - **Interop**: the official MCP Python SDK through mcpsum to official reference servers
   (`mcp-server-time`, `server-everything`).
-- **Fuzzing**: four libFuzzer targets (monitor sessions, lockfile parsing, framing,
-  escaping) on PRs and nightly.
+- **Fuzzing**: five libFuzzer targets (monitor sessions, lockfile parsing, framing,
+  escaping, egress proxy requests) on PRs and nightly.
 - **Supply chain**: pinned Actions, `cargo-deny` (licenses, advisories, sources),
-  gitleaks, zizmor, Dependabot with a cooldown.
+  gitleaks, zizmor, Dependabot with a cooldown, and release binaries that rebuild
+  bit for bit (checked in CI on all 5 targets).
 
 ## Roadmap
 
 | Milestone | Scope |
 |---|---|
-| **M1** (now) | Lockfile, proxy, CLI, test suite, docs, signed release binaries |
-| **M2** | Sandbox (Linux, files + no network: shipped) with a per-host egress allowlist next; macOS/Windows backends; credential broker (servers get scoped tokens, not your secrets) |
+| **M1** (shipped) | Lockfile, proxy, CLI, test suite, docs, release binaries with build provenance |
+| **M2** | Sandbox (Linux, shipped): files, no network or a per-host egress allowlist. Next: macOS/Windows backends; credential broker (servers get scoped tokens, not your secrets) |
 | **M3** | Taint tracking: untrusted results cannot trigger sensitive calls without approval (shipped, opt-in). Next: confidentiality labels and per-argument rules |
-| **M4** | Benchmarks (AgentDojo-style), public bypass challenge |
+| **M4** | Public bypass challenge ([open](docs/CHALLENGE.md)); benchmarks (AgentDojo-style) |
 | **M5** | Public transparency log of definitions (like Go's checksum database), microVM backend, external audit |
 
 ## Research
