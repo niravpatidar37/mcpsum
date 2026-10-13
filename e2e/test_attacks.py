@@ -23,6 +23,25 @@ def assert_clean(c: Client) -> None:
         assert s not in blob, f"poison `{s}` reached the client: {blob[:500]}"
 
 
+def audit_text_without_hashes(c: Client) -> str:
+    """The audit log minus hash chain links, timestamps and argument digests.
+
+    Those fields are random-looking digits and hex, so a numeric argument such
+    as 1300 can appear in them by chance. Digests are checked to be bare
+    SHA-256 values, so a raw argument cannot hide there either.
+    """
+    import re
+    out = []
+    for line in c.audit.read_text(encoding="utf-8").splitlines():
+        rec = json.loads(line)
+        for k in ("hash", "prev", "ts"):
+            rec.pop(k, None)
+        digest = rec.get("event", {}).pop("args_digest", None)
+        assert digest is None or re.fullmatch(r"sha256:[0-9a-f]{64}", digest), digest
+        out.append(json.dumps(rec))
+    return "\n".join(out)
+
+
 @pytest.fixture
 def client_factory():
     clients: list[Client] = []
@@ -440,7 +459,7 @@ def test_I6_injected_result_cannot_trigger_a_sink_when_the_client_cannot_prompt(
     kinds = [(e["event"]["decision"], e["event"].get("subject")) for e in ev]
     assert ("taint", "fetch") in kinds and ("deny", "add") in kinds
     assert kinds.index(("taint", "fetch")) < kinds.index(("deny", "add"))
-    assert "1300" not in c.audit.read_text(encoding="utf-8"), "arguments must not be logged"
+    assert "1300" not in audit_text_without_hashes(c), "arguments must not be logged"
     assert run("audit-verify", str(c.audit)).returncode == 0
 
 

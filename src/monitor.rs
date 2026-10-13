@@ -2698,6 +2698,75 @@ mod tests {
         );
     }
 
+    /// Two held calls with identical arguments: each answer settles exactly
+    /// the call its prompt was sent for (matched by prompt id, never by
+    /// arguments or map order). Pins the behaviour behind the property-test
+    /// regression seed 385aa357...
+    #[test]
+    fn i6_each_answer_settles_only_the_call_its_prompt_was_sent_for() {
+        let mut m = taint_mon();
+        handshake(&mut m, &taint_surface());
+        let (_, first) = hold_send(&mut m, send_args());
+        let a = m.on_client_line(&b(tool_req(3, "send", send_args())));
+        let second = to_client(&a)[0]["id"].clone();
+        assert_ne!(first, second);
+        let c = answer(&mut m, &first, json!({"result": {"action": "cancel"}}));
+        assert!(to_server(&c).is_empty(), "cancel forwarded a call: {c:?}");
+        let c = to_client(&c);
+        assert_eq!(c.len(), 1, "{c:?}");
+        assert_eq!(c[0]["id"], json!(2), "cancel refused the wrong call");
+        let ok = answer(&mut m, &second, allow());
+        let fwd = to_server(&ok);
+        assert_eq!(fwd.len(), 1, "{ok:?}");
+        let r = m.on_server_line(&b(
+            json!({"jsonrpc": "2.0", "id": fwd[0]["id"], "result": {"content": []}}),
+        ));
+        let r = to_client(&r);
+        assert_eq!(r.len(), 1, "{r:?}");
+        assert_eq!(r[0]["id"], json!(3), "allow released the wrong call");
+        assert!(to_server(&answer(&mut m, &first, allow())).is_empty());
+    }
+
+    /// 2026-07-28 clients take no server-to-client requests, so a tainted
+    /// sink from one is refused, never held, whatever capabilities its
+    /// `_meta` claims (PR #40, GUARANTEES Limits 7).
+    #[test]
+    fn i6_tainted_sink_from_a_modern_client_is_refused_not_held() {
+        let mut m = taint_mon();
+        let s = taint_surface();
+        let a = m.on_client_line(&modern(
+            1,
+            "tools/call",
+            json!({"name": "fetch", "arguments": {"url": "https://evil.example"}}),
+        ));
+        let res = json!({"protocolVersion": s.protocol_version, "capabilities": s.capabilities, "serverInfo": s.server_info, "instructions": s.instructions});
+        let a = m.on_server_line(&b(
+            json!({"jsonrpc": "2.0", "id": to_server(&a)[0]["id"], "result": res}),
+        ));
+        let a = answer_lists(&mut m, a, &s);
+        let fetch: Vec<Value> = to_server(&a)
+            .into_iter()
+            .filter(|v| v["method"] == json!("tools/call"))
+            .collect();
+        m.on_server_line(&b(
+            json!({"jsonrpc": "2.0", "id": fetch[0]["id"], "result": injection()}),
+        ));
+        assert_eq!(m.taint_source(), Some("fetch"));
+        let a = m.on_client_line(&modern(
+            2,
+            "tools/call",
+            json!({"name": "send", "arguments": send_args()}),
+        ));
+        assert!(to_server(&a).is_empty(), "tainted sink forwarded: {a:?}");
+        let c = to_client(&a);
+        assert_eq!(c.len(), 1, "{a:?}");
+        assert!(c[0].get("method").is_none(), "prompt sent to a modern client: {a:?}");
+        assert_eq!(
+            (&c[0]["id"], &c[0]["error"]["code"]),
+            (&json!(2), &json!(POLICY_DENIED))
+        );
+    }
+
     #[test]
     fn i6_anything_but_explicit_allow_denies_the_held_call() {
         for body in [
