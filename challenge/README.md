@@ -23,8 +23,8 @@ win conditions and how to report are there; this page covers running it.
 ## Run it
 
 You need [uv](https://docs.astral.sh/uv/) and an `mcpsum` binary built from
-this repository (`cargo build --locked`). The latest release, v0.1.1, predates
-the taint policy (I6) that the target uses. From the repository root:
+this repository (`cargo build --locked`) or from release v0.2.0 or later (earlier
+releases predate the taint policy, I6, that the target uses). From the repository root:
 
 ```sh
 export MCPSUM_BIN=/path/to/mcpsum   # or put mcpsum on PATH
