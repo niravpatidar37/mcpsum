@@ -31,7 +31,7 @@ mcpsum exists to keep a human in the loop. You may prepare, run and explain; the
 ## Install
 
 ```sh
-cargo install --git https://github.com/niravpatidar37/mcpsum --tag v0.1.1 --locked mcpsum
+cargo install --git https://github.com/niravpatidar37/mcpsum --tag v0.2.0 --locked mcpsum
 ```
 
 Or a release archive from https://github.com/niravpatidar37/mcpsum/releases (verify it

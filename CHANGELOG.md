@@ -6,6 +6,8 @@ All notable changes are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-13
+
 ### Added
 - Reproducible release binaries (#22). `scripts/release-build.sh` (used by the release
   workflow) remaps build paths and links with `/Brepro` (Windows) or `-S` (macOS); a new
