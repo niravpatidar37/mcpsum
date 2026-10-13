@@ -36,7 +36,7 @@ All notable changes are recorded here. The format follows
   seccomp (no network sockets, no `io_uring`, no namespaces, mounts, `bpf`, keyrings or
   `ptrace`). A policy that cannot be enforced, or that would expose mcpsum's files, stops
   the server from starting; macOS and Windows refuse sandboxed servers for now. The
-  per-host network allowlist is described below.
+  per-host network allowlist is described above.
 - I6 taint tracking, opt-in and per server (preview, #16). A user-written `policy.taint`
   section in `mcp.lock` labels tools as sources and sinks. After a source's result (or
   error, or progress message) reaches the client, a sink call is held for the user's
