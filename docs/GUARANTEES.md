@@ -9,7 +9,7 @@ that check it.
 Three kinds of test back the guarantees:
 
 - **Unit tests** (`src/monitor.rs`): one per behaviour, named `iN_...`.
-- **Property tests** (`tests/properties.rs`): 9,000 random adversarial
+- **Property tests** (`tests/properties.rs`): 12,000 random adversarial
   sessions per run, checked after every step against an *independent* oracle
   (written separately from the monitor, in the spirit of differential testing
   in Cedar's verification-guided development, [arXiv:2407.01688](https://arxiv.org/abs/2407.01688)).
@@ -18,7 +18,8 @@ Three kinds of test back the guarantees:
   on Linux and Windows. `e2e/test_interop.py` repeats this against official MCP
   reference servers.
 
-Fuzzing (`fuzz/`) runs four libFuzzer targets on every relevant PR and
+Fuzzing (`fuzz/`) runs five libFuzzer targets (monitor sessions, lockfile
+parsing, framing, escaping, egress proxy requests) on every relevant PR and
 nightly.
 
 > **Scope.** These guarantees cover the *protocol channel* between client and
