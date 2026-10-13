@@ -190,9 +190,9 @@ Read this before you rely on mcpsum. Details: [GUARANTEES.md § Limits](docs/GUA
 - **It trusts what you approve.** A definition that was poisoned when you locked it is
   served faithfully. `lock` flags hidden characters, injection markers and cross-server
   shadowing, but that check is a heuristic. Read the diff.
-- **The sandbox is opt-in and Linux-only.** Without `policy.sandbox` (and on macOS/Windows),
-  the server runs with your user's permissions. TLS through the egress allowlist is not
-  inspected.
+- **The sandbox is opt-in and Linux-only.** Without `policy.sandbox`, the server runs with
+  your user's permissions. On macOS and Windows, a server *with* `policy.sandbox` does not
+  start (fail closed). TLS through the egress allowlist is not inspected.
   The first malicious MCP server found in the wild, `postmark-mcp`, BCC'd emails through
   its own legitimate API without changing its tool definitions
   ([Koi Security](https://www.koi.security/blog/postmark-mcp-npm-malicious-backdoor-email-theft)).
@@ -208,15 +208,17 @@ Read this before you rely on mcpsum. Details: [GUARANTEES.md § Limits](docs/GUA
 
 ## How it is verified
 
-- **134 unit tests** across the monitor, lockfile, audit log, framing, rendering, sandbox,
-  egress proxy, process and proxy.
+- **130+ unit tests** (134 on Windows, 137 on Linux, where the sandbox layers are tested too)
+  across the monitor, lockfile, audit log, framing, rendering, sandbox, egress proxy, process
+  and proxy.
 - **Property tests**: 12,000 random adversarial sessions per run, checked after every
   step against an independent oracle. The first run found a real I1 gap, which was then
   fixed (#4).
 - **Adversarial e2e suite**: the real binary against a [malicious MCP server](e2e/servers/evil_server.py)
-  with 15 behaviour modes (rug pulls, schema smuggling, poisoned instructions, sampling,
-  elicitation, spoofed ids, garbage, env theft, a wedged pipe, terminal escapes, taint,
-  sandbox and egress escapes…): 40 tests on Linux and Windows.
+  with 17 behaviour modes (rug pulls, schema smuggling, poisoned instructions, sampling,
+  elicitation, spoofed ids, garbage, env theft, a wedged pipe, terminal escapes, version
+  bumps, process forks, taint, sandbox and egress escapes, multi round-trip input
+  requests): 41 test cases on Linux and Windows.
 - **Interop**: the official MCP Python SDK through mcpsum to official reference servers
   (`mcp-server-time`, `server-everything`).
 - **Fuzzing**: five libFuzzer targets (monitor sessions, lockfile parsing, framing,
