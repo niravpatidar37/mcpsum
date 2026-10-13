@@ -263,9 +263,13 @@ struct Harness {
     prompts: Vec<(Value, Value, Value)>,
     /// the call the user allowed in the current step, if any
     allowed_now: Option<Value>,
-    /// open sink calls: client id -> arguments (to bind a prompt to its call;
-    /// a call queued during re-verification is prompted for in a later step)
-    open_sink_calls: HashMap<String, (Value, Value)>,
+    /// open sink calls that have neither a prompt nor been forwarded, in
+    /// arrival order: (client id, arguments). The monitor gates calls in that
+    /// order (a call queued during re-verification is gated in a later step),
+    /// and a prompt shows only the arguments, so a prompt belongs to the
+    /// earliest of these with matching arguments. Never a `HashMap`: its
+    /// iteration order is random and calls with equal arguments are common.
+    unprompted_sinks: Vec<(Value, Value)>,
 }
 
 fn key(id: &Value) -> String {
@@ -296,7 +300,7 @@ impl Harness {
             taint_recorded: false,
             prompts: Vec::new(),
             allowed_now: None,
-            open_sink_calls: HashMap::new(),
+            unprompted_sinks: Vec::new(),
         }
     }
 
@@ -313,8 +317,7 @@ impl Harness {
             self.open_source.insert(key(&id));
         }
         if method == "tools/call" && params["name"] == json!("add") {
-            self.open_sink_calls
-                .insert(key(&id), (id.clone(), params["arguments"].clone()));
+            self.unprompted_sinks.push((id.clone(), params["arguments"].clone()));
         }
         let msg = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
         self.m.on_client_line(&serde_json::to_vec(&msg).unwrap())
@@ -486,12 +489,11 @@ impl Harness {
                         );
                         let msg = v["params"]["message"].as_str().unwrap_or("");
                         let bound = self
-                            .open_sink_calls
-                            .values()
-                            .find(|(_, args)| msg.contains(&args.to_string()))
-                            .cloned();
+                            .unprompted_sinks
+                            .iter()
+                            .position(|(_, args)| msg.contains(&args.to_string()));
                         prop_assert!(bound.is_some(), "prompt matches no open sink call: {}", text);
-                        let (cid, args) = bound.unwrap();
+                        let (cid, args) = self.unprompted_sinks.remove(bound.unwrap());
                         self.prompts.push((v["id"].clone(), cid, args));
                         continue;
                     }
@@ -526,7 +528,7 @@ impl Harness {
                         continue;
                     }
                     let k = key(&id);
-                    self.open_sink_calls.remove(&k);
+                    self.unprompted_sinks.retain(|(cid, _)| *cid != id);
                     // I6: server text from a source must be recorded as taint first.
                     if self.open_source.remove(&k) && (text.contains(SRV) || text.contains(EVIL)) {
                         prop_assert!(
@@ -566,6 +568,14 @@ impl Harness {
                             oracle_call_allowed(name, &v["params"]["arguments"]),
                             "oracle rejects forwarded call: {v}"
                         );
+                        // Forwarded without a prompt: the earliest such call (the
+                        // monitor gates in arrival order) can no longer be prompted.
+                        if name == "add" && self.allowed_now.is_none() {
+                            let args = &v["params"]["arguments"];
+                            if let Some(i) = self.unprompted_sinks.iter().position(|(_, a)| a == args) {
+                                self.unprompted_sinks.remove(i);
+                            }
+                        }
                         // I6: a sink after taint only with this step's explicit allow,
                         // for exactly the arguments shown, at most once.
                         if self.with_policy && name == "add" && self.oracle_tainted {
@@ -668,4 +678,71 @@ fn oracle_matches_known_cases() {
     assert!(oracle_call_allowed("noargs", &json!({})));
     assert!(!oracle_call_allowed("noargs", &json!({"x": 1})));
     assert!(!oracle_call_allowed("exec", &json!({})));
+}
+
+/// I6 oracle regression (seed 385aa357...): two open sink calls with the same
+/// arguments. A prompt shows only the arguments, so the oracle must bind each
+/// prompt to the earliest call that has no prompt yet, in arrival order (the
+/// order in which the monitor gates calls). Binding through `HashMap`
+/// iteration order bound it to the wrong call about half the time; the oracle
+/// then lost track of a live prompt and flagged the user's explicit allow of
+/// that prompt as a sink forwarded without approval. Each case runs many
+/// times, because each fresh `HashMap` gets a new random iteration order.
+#[test]
+fn i6_oracle_binds_each_prompt_to_its_own_call() {
+    let add = || {
+        Op::Client(ClientOp::Call {
+            name: "add".into(),
+            args: json!({"a": 1, "b": 2}),
+        })
+    };
+    let source = || {
+        Op::Client(ClientOp::Call {
+            name: "noargs".into(),
+            args: json!({}),
+        })
+    };
+    let respond = |k| {
+        Op::Server(ServerOp::Respond {
+            k,
+            payload: Payload::Clean,
+        })
+    };
+    let answer = |k, reply| Op::Client(ClientOp::Answer { k, reply });
+    let cases = [
+        // Two held calls: cancel the first prompt, allow the second.
+        vec![
+            source(),
+            respond(0),
+            add(),
+            add(),
+            answer(0, Reply::Cancel),
+            answer(1, Reply::Allow),
+        ],
+        // A call forwarded before the taint is still open when an identical
+        // call is held; the first one's result must not withdraw the prompt.
+        vec![add(), source(), respond(1), add(), respond(0), answer(0, Reply::Allow)],
+        // Two calls queued during re-verification are prompted for in one
+        // step: the first prompt is the first call's.
+        vec![
+            source(),
+            respond(0),
+            Op::Server(ServerOp::ListChanged),
+            add(),
+            add(),
+            respond(0),
+            respond(0),
+            respond(0),
+            respond(0),
+            answer(0, Reply::Cancel),
+            answer(1, Reply::Allow),
+        ],
+    ];
+    for ops in &cases {
+        for _ in 0..32 {
+            let mut h = Harness::with_policy();
+            clean_handshake_then(&mut h, ops).unwrap();
+            assert!(h.oracle_tainted && h.prompts.is_empty(), "{ops:?}");
+        }
+    }
 }
