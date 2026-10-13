@@ -2712,14 +2712,18 @@ mod tests {
         assert_ne!(first, second);
         let c = answer(&mut m, &first, json!({"result": {"action": "cancel"}}));
         assert!(to_server(&c).is_empty(), "cancel forwarded a call: {c:?}");
-        assert_eq!(to_client(&c)[0]["id"], json!(2), "cancel refused the wrong call");
+        let c = to_client(&c);
+        assert_eq!(c.len(), 1, "{c:?}");
+        assert_eq!(c[0]["id"], json!(2), "cancel refused the wrong call");
         let ok = answer(&mut m, &second, allow());
         let fwd = to_server(&ok);
         assert_eq!(fwd.len(), 1, "{ok:?}");
         let r = m.on_server_line(&b(
             json!({"jsonrpc": "2.0", "id": fwd[0]["id"], "result": {"content": []}}),
         ));
-        assert_eq!(to_client(&r)[0]["id"], json!(3), "allow released the wrong call");
+        let r = to_client(&r);
+        assert_eq!(r.len(), 1, "{r:?}");
+        assert_eq!(r[0]["id"], json!(3), "allow released the wrong call");
         assert!(to_server(&answer(&mut m, &first, allow())).is_empty());
     }
 
