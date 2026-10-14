@@ -287,6 +287,78 @@ def test_I1_modern_only_drift_fails_verify_and_lock(tmp_path):
     assert "initialize" not in [m for m, _ in modern_requests(r.stderr)]
 
 
+def proxied_requests(c: Client, method: str, timeout: float = 10) -> list[tuple[str, dict]]:
+    """Requests the modern-only server behind the proxy logged, once `method` is among them."""
+    deadline = time.monotonic() + timeout
+    while True:
+        seen = modern_requests("\n".join(list(c.stderr_lines)))
+        if any(m == method for m, _ in seen) or time.monotonic() > deadline:
+            return seen
+        time.sleep(0.05)
+
+
+def test_I1_modern_only_server_is_proxied_for_both_client_eras(tmp_path, client_factory):
+    lockp = lock_evil(tmp_path, "modern-only")
+    legacy = client_factory(lockp)  # mcpsum answers initialize itself, from the lock
+    init = legacy.initialize()["result"]
+    assert (init["protocolVersion"], init["serverInfo"]["name"]) == ("2025-06-18", "evil-modern")
+    r = legacy.call(1, "add", {"a": 2, "b": 3})["result"]
+    assert r["content"][0]["text"] == "5" and "resultType" not in r
+    legacy.close()
+    modern = client_factory(lockp)
+    r = modern.request(1, "tools/call", {"name": "add", "arguments": {"a": 1, "b": 2}, "_meta": {
+        **MODERN, "io.modelcontextprotocol/clientInfo": {"name": "client-name", "version": "1"}}})["result"]
+    assert r["content"][0]["text"] == "3" and r["resultType"] == "complete"
+    for c in (legacy, modern):
+        seen = proxied_requests(c, "tools/call")
+        assert seen[0][0] == "server/discover" and "tools/call" in [m for m, _ in seen], seen
+        assert_own_meta(seen, "mcpsum")
+        assert_clean(c)
+
+
+def test_I1_modern_only_rugpull_after_lock_quarantines(tmp_path, client_factory):
+    poison = tmp_path / "poison"
+    lockp = lock_evil(tmp_path, "modern-only", poison_file=poison)
+    poison.write_text("rugpull", encoding="utf-8")
+    legacy = client_factory(lockp)
+    legacy.initialize()
+    assert legacy.request(1, "tools/list")["result"]["tools"][0]["description"] == "Add two numbers."
+    assert legacy.call(2, "add", {"a": 1, "b": 2})["error"]["code"] == QUARANTINED
+    legacy.close()
+    modern = client_factory(lockp)
+    r = modern.request(1, "tools/call", {"name": "add", "arguments": {"a": 1, "b": 2}, "_meta": MODERN})
+    assert r["error"]["code"] == QUARANTINED
+    for c in (legacy, modern):
+        assert "tools/call" not in [m for m, _ in proxied_requests(c, "tools/list")]
+        assert_clean(c)
+
+
+def test_I7_modern_only_server_that_drops_the_locked_version_is_quarantined(tmp_path, client_factory):
+    poison = tmp_path / "poison"
+    lockp = lock_evil(tmp_path, "modern-only", poison_file=poison)
+    poison.write_text("version", encoding="utf-8")
+    c = client_factory(lockp)
+    c.initialize()
+    assert c.call(1, "add", {"a": 1, "b": 2})["error"]["code"] == QUARANTINED
+    assert [m for m, _ in proxied_requests(c, "server/discover")] == ["server/discover"]
+
+
+def test_I3_modern_only_input_required_never_reaches_client(tmp_path, client_factory):
+    poison = tmp_path / "poison"
+    lockp = lock_evil(tmp_path, "modern-only", poison_file=poison)
+    poison.write_text("mrtr", encoding="utf-8")
+    legacy = client_factory(lockp)
+    legacy.initialize()
+    assert legacy.call(1, "add", {"a": 1, "b": 2})["error"]["code"] == -32001
+    legacy.close()
+    modern = client_factory(lockp)
+    r = modern.request(1, "tools/call", {"name": "add", "arguments": {"a": 1, "b": 2}, "_meta": MODERN})
+    assert r["error"]["code"] == -32001
+    for c in (legacy, modern):
+        assert "password" not in c.everything_received()
+        assert_clean(c)
+
+
 # ------------------------------------------------- I7: fail closed
 
 def test_I7_spoofed_and_duplicate_responses_are_dropped(tmp_path, client_factory):

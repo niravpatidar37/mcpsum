@@ -13,9 +13,13 @@ All notable changes are recorded here. The format follows
   2026-07-28 error (`-32021`, `-32022`). A 2026-07-28 entry records `supportedVersions`
   and needs `lockfileVersion: 2`; files without one stay at version 1, so older mcpsum
   still reads them, and versions other than 1 and 2 are refused. `verify` and a re-lock
-  ask an existing entry in its own era first; a change of era is definitional drift. The
-  proxy does not speak 2026-07-28 to servers yet (next change): until then it opens such
-  an entry with `initialize`, which a 2026-07-28-only server refuses.
+  ask an existing entry in its own era first; a change of era is definitional drift.
+- The proxy in front of servers that speak only MCP 2026-07-28 (#21). It never sends
+  them `initialize`: it answers a legacy client's `initialize` from the lock, opens the
+  server with its own `server/discover` (locked version in `_meta`, no client
+  capabilities, mcpsum's `clientInfo`) and verifies the live version list, instructions
+  and definitions before any call; drift quarantines. Every forwarded request carries
+  only mcpsum's `_meta`, and multi round-trip input requests stay refused (`-32001`).
 
 ### Changed
 - A fresh `lock` of a server that speaks both eras now records it as 2026-07-28.

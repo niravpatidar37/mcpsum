@@ -106,8 +106,8 @@ These are the risks that remain, from highest to lowest:
 ## Not yet assessed
 
 - Remote transports (Streamable HTTP, OAuth).
-- Servers that speak only the 2026-07-28 revision (clients of that revision
-  are mediated; see [GUARANTEES.md](GUARANTEES.md#limits)).
+- 2026-07-28 servers other than mcpsum's adversarial test server and the
+  official Python SDK 2.3.0 (see [GUARANTEES.md](GUARANTEES.md#limits)).
 - Every client's handling of a quarantined server (only Claude Code has been
   checked by hand).
 - A formal model of the session state machine (TLA+ or Kani is on the roadmap).
