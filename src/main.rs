@@ -227,6 +227,12 @@ fn cmd_lock(
     };
     let opts = ProbeOptions {
         sandbox: prepared.as_ref().map(|p| p.spec.clone()),
+        // Keep the era of an existing entry (2026-07-28 stdio: the era may
+        // be persisted per server configuration).
+        prefer_legacy: lf
+            .servers
+            .get(name)
+            .is_some_and(|s| s.surface.supported_versions.is_none()),
         ..opts
     };
     let surface = probe(&command, &env, &opts)?;
@@ -307,6 +313,7 @@ fn cmd_verify(lock: &Path, name: Option<&str>, timeout_secs: u64, strict: bool) 
         };
         let opts = ProbeOptions {
             sandbox: prepared.as_ref().map(|p| p.spec.clone()),
+            prefer_legacy: entry.surface.supported_versions.is_none(),
             ..opts.clone()
         };
         let live = probe(&entry.command, &entry.env_passthrough, &opts).with_context(|| format!("server `{n}`"))?;

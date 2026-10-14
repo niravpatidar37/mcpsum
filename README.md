@@ -208,17 +208,17 @@ Read this before you rely on mcpsum. Details: [GUARANTEES.md § Limits](docs/GUA
 
 ## How it is verified
 
-- **130+ unit tests** (134 on Windows, 137 on Linux, where the sandbox layers are tested too)
+- **140+ unit tests** (143 on Windows, 146 on Linux, where the sandbox layers are tested too)
   across the monitor, lockfile, audit log, framing, rendering, sandbox, egress proxy, process
   and proxy.
 - **Property tests**: 12,000 random adversarial sessions per run, checked after every
   step against an independent oracle. The first run found a real I1 gap, which was then
   fixed (#4).
 - **Adversarial e2e suite**: the real binary against a [malicious MCP server](e2e/servers/evil_server.py)
-  with 17 behaviour modes (rug pulls, schema smuggling, poisoned instructions, sampling,
+  with 19 behaviour modes (rug pulls, schema smuggling, poisoned instructions, sampling,
   elicitation, spoofed ids, garbage, env theft, a wedged pipe, terminal escapes, version
   bumps, process forks, taint, sandbox and egress escapes, multi round-trip input
-  requests): 41 test cases on Linux and Windows.
+  requests, a 2026-07-28-only server and a dual-era one): 44 test cases on Linux and Windows.
 - **Interop**: the official MCP Python SDK through mcpsum to official reference servers
   (`mcp-server-time`, `server-everything`).
 - **Fuzzing**: five libFuzzer targets (monitor sessions, lockfile parsing, framing,
