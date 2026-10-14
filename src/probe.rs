@@ -16,11 +16,15 @@ use serde_json::{json, Value};
 
 use crate::framing::{BoundedLines, Frame};
 use crate::lock::{Surface, MAX_ITEMS_PER_KIND};
+use crate::monitor::{modern_meta, META_SERVER_INFO, MODERN_VERSIONS};
 use crate::process::{relay_stderr, spawn_server};
 
-/// Newest handshake protocol revision we speak. The 2026-07-28 "modern"
-/// (server/discover) protocol is not supported yet.
+/// Newest `initialize` (legacy) revision we speak. The server's era is
+/// detected first, per the 2026-07-28 stdio backward-compatibility rules.
 pub const PROBE_PROTOCOL_VERSION: &str = "2025-11-25";
+/// 2026-07-28 errors that identify a modern server (`MissingRequiredClientCapabilityError`,
+/// `UnsupportedProtocolVersionError`): never a reason to fall back to `initialize`.
+const MODERN_ERRORS: [i64; 2] = [-32021, -32022];
 const MAX_PAGES: usize = 50;
 
 #[derive(Debug, Clone)]
@@ -29,6 +33,9 @@ pub struct ProbeOptions {
     pub max_line_bytes: usize,
     /// I5: probe the server inside its sandbox (re-lock and verify).
     pub sandbox: Option<crate::sandbox::SandboxSpec>,
+    /// The server is locked over `initialize`: try that era first (re-lock,
+    /// verify), so a server that speaks both keeps the era it was locked in.
+    pub prefer_legacy: bool,
 }
 
 impl Default for ProbeOptions {
@@ -37,6 +44,7 @@ impl Default for ProbeOptions {
             timeout: Duration::from_secs(30),
             max_line_bytes: 4 * 1024 * 1024,
             sandbox: None,
+            prefer_legacy: false,
         }
     }
 }
@@ -46,6 +54,8 @@ struct Session {
     rx: Receiver<std::io::Result<Frame>>,
     next_id: u64,
     timeout: Duration,
+    /// 2026-07-28: `_meta` sent with every request (none for legacy servers).
+    meta: Option<Value>,
 }
 
 impl Session {
@@ -59,15 +69,27 @@ impl Session {
     /// Send a request and wait for its response. Server-initiated requests are
     /// refused (ping answered); notifications and unrelated messages ignored.
     fn request(&mut self, method: &str, params: Value) -> Result<std::result::Result<Value, Value>> {
+        match self.request_or_timeout(method, params)? {
+            Some(r) => Ok(r),
+            None => bail!("timed out after {:?} waiting for `{method}`", self.timeout),
+        }
+    }
+
+    /// Like `request`, but a timeout is `None` rather than an error.
+    fn request_or_timeout(&mut self, method: &str, params: Value) -> Result<Option<std::result::Result<Value, Value>>> {
         let id = self.next_id;
         self.next_id += 1;
+        let mut params = params;
+        if let (Some(meta), Some(p)) = (&self.meta, params.as_object_mut()) {
+            p.insert("_meta".into(), meta.clone());
+        }
         self.write(&json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}))?;
         let deadline = Instant::now() + self.timeout;
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
             let frame = match self.rx.recv_timeout(left) {
                 Ok(f) => f.context("reading from server")?,
-                Err(RecvTimeoutError::Timeout) => bail!("timed out after {:?} waiting for `{method}`", self.timeout),
+                Err(RecvTimeoutError::Timeout) => return Ok(None),
                 Err(RecvTimeoutError::Disconnected) => bail!("server exited before answering `{method}`"),
             };
             let Frame::Line(line) = frame else { continue };
@@ -86,9 +108,9 @@ impl Session {
                 }
                 (None, Some(rid)) if rid.as_u64() == Some(id) => {
                     if let Some(e) = obj.get("error") {
-                        return Ok(Err(e.clone()));
+                        return Ok(Some(Err(e.clone())));
                     }
-                    return Ok(Ok(obj.get("result").cloned().unwrap_or(Value::Null)));
+                    return Ok(Some(Ok(obj.get("result").cloned().unwrap_or(Value::Null))));
                 }
                 _ => {}
             }
@@ -109,21 +131,191 @@ impl Session {
                 Err(e) if e.get("code").and_then(Value::as_i64) == Some(-32601) => return Ok(out),
                 Err(e) => bail!("`{method}` failed: {}", crate::render::escape_untrusted(&e.to_string())),
             };
-            let items = res
-                .get(field)
-                .and_then(Value::as_array)
-                .ok_or_else(|| anyhow!("`{method}` result has no `{field}` array"))?;
+            let (items, next) = list_page(method, field, &res)?;
             out.extend(items.iter().cloned());
             if out.len() > MAX_ITEMS_PER_KIND {
                 bail!("server returned more than {MAX_ITEMS_PER_KIND} items for `{method}`");
             }
-            match res.get("nextCursor").and_then(Value::as_str) {
-                Some(c) => cursor = Some(c.to_string()),
+            match next {
+                Some(c) => cursor = Some(c),
                 None => return Ok(out),
             }
         }
         bail!("`{method}` exceeded {MAX_PAGES} pages")
     }
+}
+
+/// One page of a list result: its items and the next cursor. A 2026-07-28
+/// result that is not `complete` (an input request) is refused.
+fn list_page<'a>(method: &str, field: &str, res: &'a Value) -> Result<(&'a Vec<Value>, Option<String>)> {
+    if res.get("resultType").is_some_and(|t| t != "complete") {
+        bail!("`{method}` did not complete (resultType is not \"complete\")");
+    }
+    let items = res
+        .get(field)
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("`{method}` result has no `{field}` array"))?;
+    Ok((items, res.get("nextCursor").and_then(Value::as_str).map(str::to_string)))
+}
+
+/// The opening of a 2026-07-28 server (`DiscoverResult`), as an empty surface.
+/// Untrusted input: anything ambiguous is rejected (fail closed).
+pub fn discover_surface(res: &Value) -> Result<Surface> {
+    if res.get("resultType").is_some_and(|t| t != "complete") {
+        bail!("server/discover did not complete (resultType is not \"complete\")");
+    }
+    let mut versions = res
+        .get("supportedVersions")
+        .and_then(Value::as_array)
+        .context("server/discover result has no supportedVersions array")?
+        .iter()
+        .map(|v| v.as_str().map(str::to_string))
+        .collect::<Option<Vec<_>>>()
+        .context("server/discover supportedVersions must be strings")?;
+    versions.sort();
+    versions.dedup();
+    let Some(pv) = MODERN_VERSIONS.iter().find(|m| versions.iter().any(|v| v == *m)) else {
+        bail!(
+            "the server supports {} only; mcpsum speaks {}",
+            crate::render::escape_untrusted(&versions.join(", ")),
+            MODERN_VERSIONS.join(", ")
+        );
+    };
+    let capabilities = res
+        .get("capabilities")
+        .cloned()
+        .filter(Value::is_object)
+        .context("server/discover result has no capabilities object")?;
+    let server_info = res
+        .get("_meta")
+        .and_then(|m| m.get(META_SERVER_INFO))
+        .cloned()
+        .filter(Value::is_object)
+        .context("server/discover result has no serverInfo in `_meta` (mcpsum needs it to serve legacy clients)")?;
+    let instructions = match res.get("instructions") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(i)) => Some(i.clone()),
+        Some(_) => bail!("server/discover instructions is not a string"),
+    };
+    Ok(Surface {
+        protocol_version: pv.to_string(),
+        supported_versions: Some(versions),
+        server_info,
+        instructions,
+        capabilities,
+        tools: vec![],
+        prompts: vec![],
+        resources: vec![],
+        resource_templates: vec![],
+    })
+}
+
+fn legacy_surface(init: &Value) -> Result<Surface> {
+    let protocol_version = init
+        .get("protocolVersion")
+        .and_then(Value::as_str)
+        .context("initialize result has no protocolVersion")?
+        .to_string();
+    let capabilities = init
+        .get("capabilities")
+        .cloned()
+        .filter(Value::is_object)
+        .context("initialize result has no capabilities")?;
+    let server_info = init
+        .get("serverInfo")
+        .cloned()
+        .filter(Value::is_object)
+        .context("initialize result has no serverInfo")?;
+    let instructions = init.get("instructions").and_then(Value::as_str).map(str::to_string);
+    Ok(Surface {
+        protocol_version,
+        supported_versions: None,
+        server_info,
+        instructions,
+        capabilities,
+        tools: vec![],
+        prompts: vec![],
+        resources: vec![],
+        resource_templates: vec![],
+    })
+}
+
+/// What a `server/discover` probe tells about the server's era (2026-07-28
+/// stdio, backward compatibility): a `DiscoverResult` is modern, a recognized
+/// modern error is modern but unusable (never fall back), anything else or no
+/// answer (`None`) is legacy (`Ok(None)`).
+pub fn classify_discover(reply: Option<std::result::Result<Value, Value>>) -> Result<Option<Surface>> {
+    match reply {
+        Some(Ok(res)) => discover_surface(&res).map(Some),
+        Some(Err(e))
+            if e.get("code")
+                .and_then(Value::as_i64)
+                .is_some_and(|c| MODERN_ERRORS.contains(&c)) =>
+        {
+            bail!(
+                "the server speaks 2026-07-28 or later but refused mcpsum's {}: {}",
+                MODERN_VERSIONS.join(", "),
+                crate::render::escape_untrusted(&e.to_string())
+            )
+        }
+        Some(Err(_)) | None => Ok(None),
+    }
+}
+
+fn send_initialize(s: &mut Session) -> Result<std::result::Result<Value, Value>> {
+    s.meta = None;
+    s.request(
+        "initialize",
+        json!({
+            "protocolVersion": PROBE_PROTOCOL_VERSION,
+            "capabilities": {},
+            "clientInfo": {"name": "mcpsum-probe", "version": env!("CARGO_PKG_VERSION")},
+        }),
+    )
+}
+
+/// `server/discover` with mcpsum's preferred version, then the version it picked.
+fn send_discover(s: &mut Session) -> Result<Option<Surface>> {
+    s.meta = Some(modern_meta(MODERN_VERSIONS[0], "mcpsum-probe"));
+    let surface = classify_discover(s.request_or_timeout("server/discover", json!({}))?)?;
+    s.meta = surface
+        .as_ref()
+        .map(|m| modern_meta(&m.protocol_version, "mcpsum-probe"));
+    Ok(surface)
+}
+
+/// Open the session and detect the server's era. Default order is the spec's
+/// (stdio, backward compatibility): `server/discover` first, `initialize` on
+/// any other error or no answer. A server locked over `initialize` is asked
+/// that way first, and only a rejected `initialize` leads to `server/discover`.
+fn open(s: &mut Session, prefer_legacy: bool) -> Result<Surface> {
+    let escape = |e: &Value| crate::render::escape_untrusted(&e.to_string());
+    let surface = if prefer_legacy {
+        match send_initialize(s)? {
+            Ok(init) => legacy_surface(&init)?,
+            Err(e) => match send_discover(s).with_context(|| format!("initialize failed: {}", escape(&e)))? {
+                Some(modern) => modern,
+                None => bail!("initialize failed: {}; server/discover failed too", escape(&e)),
+            },
+        }
+    } else {
+        match send_discover(s)? {
+            Some(modern) => modern,
+            None => {
+                let init = send_initialize(s)?.map_err(|e| {
+                    anyhow!(
+                        "server/discover and initialize both failed (initialize: {})",
+                        escape(&e)
+                    )
+                })?;
+                legacy_surface(&init)?
+            }
+        }
+    };
+    if surface.supported_versions.is_none() {
+        s.write(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"}))?;
+    }
+    Ok(surface)
 }
 
 pub fn probe(argv: &[String], env_passthrough: &[String], opts: &ProbeOptions) -> Result<Surface> {
@@ -166,46 +358,11 @@ pub fn probe(argv: &[String], env_passthrough: &[String], opts: &ProbeOptions) -
         rx,
         next_id: 1,
         timeout: opts.timeout,
+        meta: None,
     };
 
-    let init = s
-        .request(
-            "initialize",
-            json!({
-                "protocolVersion": PROBE_PROTOCOL_VERSION,
-                "capabilities": {},
-                "clientInfo": {"name": "mcpsum-probe", "version": env!("CARGO_PKG_VERSION")},
-            }),
-        )?
-        .map_err(|e| anyhow!("initialize failed: {}", crate::render::escape_untrusted(&e.to_string())))?;
-    let protocol_version = init
-        .get("protocolVersion")
-        .and_then(Value::as_str)
-        .context("initialize result has no protocolVersion")?
-        .to_string();
-    let capabilities = init
-        .get("capabilities")
-        .cloned()
-        .filter(Value::is_object)
-        .context("initialize result has no capabilities")?;
-    let server_info = init
-        .get("serverInfo")
-        .cloned()
-        .filter(Value::is_object)
-        .context("initialize result has no serverInfo")?;
-    let instructions = init.get("instructions").and_then(Value::as_str).map(str::to_string);
-    s.write(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"}))?;
-
-    let mut surface = Surface {
-        protocol_version,
-        server_info,
-        instructions,
-        capabilities: capabilities.clone(),
-        tools: vec![],
-        prompts: vec![],
-        resources: vec![],
-        resource_templates: vec![],
-    };
+    let mut surface = open(&mut s, opts.prefer_legacy)?;
+    let capabilities = surface.capabilities.clone();
     if capabilities.get("tools").is_some() {
         surface.tools = s.list_all("tools/list", "tools")?;
     }
@@ -218,4 +375,96 @@ pub fn probe(argv: &[String], env_passthrough: &[String], opts: &ProbeOptions) -
     }
     surface.validate()?;
     Ok(surface)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn discover() -> Value {
+        json!({"resultType": "complete", "supportedVersions": ["2027-01-01", "2026-07-28", "2026-07-28"],
+            "capabilities": {"tools": {}}, "instructions": "Arithmetic helper.", "ttlMs": 5, "cacheScope": "public",
+            "_meta": {"io.modelcontextprotocol/serverInfo": {"name": "demo", "version": "1"}}})
+    }
+
+    #[test]
+    fn discover_result_is_recorded_with_the_version_mcpsum_speaks() {
+        let s = discover_surface(&discover()).unwrap();
+        assert_eq!(s.protocol_version, "2026-07-28");
+        assert_eq!(
+            s.supported_versions,
+            Some(vec!["2026-07-28".into(), "2027-01-01".into()])
+        );
+        assert_eq!(s.server_info, json!({"name": "demo", "version": "1"}));
+        assert_eq!(s.capabilities, json!({"tools": {}}));
+        assert_eq!(s.instructions.as_deref(), Some("Arithmetic helper."));
+        assert!(s.tools.is_empty());
+    }
+
+    #[test]
+    fn ambiguous_or_unusable_discover_results_are_refused() {
+        let mut cases = Vec::new();
+        for (ptr, v) in [
+            ("/supportedVersions", json!(["2027-01-01"])),
+            ("/supportedVersions", json!(["2026-07-28", 7])),
+            ("/supportedVersions", json!("2026-07-28")),
+            ("/capabilities", json!([])),
+            ("/resultType", json!("input_required")),
+            ("/_meta", json!({})),
+            ("/instructions", json!(["x"])),
+        ] {
+            let mut d = discover();
+            *d.pointer_mut(ptr).unwrap() = v;
+            cases.push(d);
+        }
+        let mut no_caps = discover();
+        no_caps.as_object_mut().unwrap().remove("capabilities");
+        cases.push(no_caps);
+        for d in cases {
+            assert!(discover_surface(&d).is_err(), "{d}");
+        }
+        // The error names what the server supports, escaped.
+        let mut d = discover();
+        d["supportedVersions"] = json!(["2027-01-01\u{202e}"]);
+        let e = discover_surface(&d).unwrap_err().to_string();
+        assert!(e.contains("2027-01-01") && !e.contains('\u{202e}'), "{e}");
+    }
+
+    #[test]
+    fn list_pages_that_ask_for_input_are_refused() {
+        let page = json!({"resultType": "complete", "tools": [{"name": "a"}], "nextCursor": "c"});
+        let (items, next) = list_page("tools/list", "tools", &page).unwrap();
+        assert_eq!((items.len(), next.as_deref()), (1, Some("c")));
+        assert!(
+            list_page("tools/list", "tools", &json!({"tools": []})).is_ok(),
+            "legacy: no resultType"
+        );
+        let ask = json!({"resultType": "input_required", "tools": [{"name": "a"}], "inputRequests": {}});
+        assert!(list_page("tools/list", "tools", &ask).is_err());
+        assert!(list_page("tools/list", "tools", &json!({"resultType": "complete"})).is_err());
+    }
+
+    /// 2026-07-28 stdio backward compatibility: a recognized modern error
+    /// means "modern, pick another version", never "fall back to initialize";
+    /// any other error, or no answer, means legacy.
+    #[test]
+    fn discover_probe_falls_back_to_initialize_only_for_non_modern_errors() {
+        assert!(classify_discover(Some(Ok(discover()))).unwrap().is_some());
+        for code in [-32601, -32602, -32600, -32603, -32000, -32002] {
+            let e = json!({"code": code, "message": "Received request before initialization was complete"});
+            assert!(classify_discover(Some(Err(e))).unwrap().is_none(), "{code}");
+        }
+        assert!(classify_discover(Some(Err(json!({"message": "no code"}))))
+            .unwrap()
+            .is_none());
+        assert!(
+            classify_discover(None).unwrap().is_none(),
+            "no answer within the timeout is legacy"
+        );
+        for code in [-32021, -32022] {
+            let e = json!({"code": code, "message": "nope\u{1b}[2J", "data": {"supported": ["2099-01-01"], "requested": "2026-07-28"}});
+            let err = classify_discover(Some(Err(e))).unwrap_err().to_string();
+            assert!(err.contains("2099-01-01") && !err.contains('\u{1b}'), "{err}");
+        }
+    }
 }

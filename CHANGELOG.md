@@ -6,6 +6,21 @@ All notable changes are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+- `lock` and `verify` for servers that speak only MCP 2026-07-28 (#21). `lock` now
+  detects a server's era the way the spec asks a dual-era client to on stdio:
+  `server/discover` first, `initialize` after any other error or no answer, never after a
+  2026-07-28 error (`-32021`, `-32022`). A 2026-07-28 entry records `supportedVersions`
+  and needs `lockfileVersion: 2`; files without one stay at version 1, so older mcpsum
+  still reads them, and versions other than 1 and 2 are refused. `verify` and a re-lock
+  ask an existing entry in its own era first; a change of era is definitional drift. The
+  proxy does not speak 2026-07-28 to servers yet (next change): until then it opens such
+  an entry with `initialize`, which a 2026-07-28-only server refuses.
+
+### Changed
+- A fresh `lock` of a server that speaks both eras now records it as 2026-07-28.
+  Existing entries keep their era.
+
 ## [0.2.0] - 2026-10-13
 
 ### Added

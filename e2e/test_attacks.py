@@ -217,6 +217,76 @@ def test_I3_input_required_result_is_refused(tmp_path, client_factory):
     assert_clean(c)
 
 
+# ------------------------- 2026-07-28-only servers (no initialize, `_meta` per request)
+
+def modern_requests(text: str) -> list[tuple[str, dict]]:
+    """(method, _meta) of every request the modern-only server logged."""
+    seen = [ln.split("MODERN_META=", 1)[1].split(" ", 1) for ln in text.splitlines() if "MODERN_META=" in ln]
+    return [(m, json.loads(j)) for m, j in seen]
+
+
+def assert_own_meta(seen: list[tuple[str, dict]], client: str) -> None:
+    """Only mcpsum's own `_meta` reached the server: the locked version, no client capabilities."""
+    assert seen and "initialize" not in [m for m, _ in seen], seen
+    for _, meta in seen:
+        assert meta["io.modelcontextprotocol/protocolVersion"] == "2026-07-28", meta
+        assert meta["io.modelcontextprotocol/clientCapabilities"] == {}, meta
+        assert meta["io.modelcontextprotocol/clientInfo"]["name"] == client, meta
+
+
+def test_era_is_probed_with_discover_first_and_a_locked_era_is_kept(tmp_path):
+    # 2026-07-28 stdio backward compatibility: a fresh lock probes `server/discover`
+    # first, so a server that speaks both eras is locked as 2026-07-28 ...
+    fresh = lock_evil(tmp_path, "dual-era")
+    lf = json.loads(fresh.read_text(encoding="utf-8"))
+    assert lf["lockfileVersion"] == 2 and lf["servers"]["evil"]["protocolVersion"] == "2026-07-28", lf
+    # ... while an entry locked over `initialize` keeps its era on verify and re-lock.
+    (tmp_path / "old").mkdir()
+    old = lock_evil(tmp_path / "old", "clean")
+    text = old.read_text(encoding="utf-8")
+    assert text.count('"clean"') == 1
+    old.write_text(text.replace('"clean"', '"dual-era"'), encoding="utf-8")
+    r = run("verify", "--strict", "--lock", str(old))
+    assert r.returncode == 0 and r.stdout.startswith("ok"), r.stdout + r.stderr
+    r = run("lock", "--lock", str(old), "--name", "evil", "--", sys.executable, EVIL, "--mode", "dual-era")
+    assert r.returncode == 0 and "unchanged" in r.stdout, r.stdout + r.stderr
+    lf = json.loads(old.read_text(encoding="utf-8"))
+    assert lf["lockfileVersion"] == 1 and "supportedVersions" not in lf["servers"]["evil"], lf
+
+
+def test_modern_only_server_is_locked_and_verified(tmp_path):
+    lockp = lock_evil(tmp_path, "modern-only")
+    lf = json.loads(lockp.read_text(encoding="utf-8"))
+    entry = lf["servers"]["evil"]
+    assert lf["lockfileVersion"] == 2
+    assert (entry["protocolVersion"], entry["supportedVersions"]) == ("2026-07-28", ["2026-07-28"])
+    assert entry["serverInfo"] == {"name": "evil-modern", "version": "1.0.0"}
+    assert [t["name"] for t in entry["tools"]] == ["add", "echo_env"]
+    seen = modern_requests(lock_evil.last.stderr)
+    assert seen[0][0] == "server/discover", seen
+    assert_own_meta(seen, "mcpsum-probe")
+    r = run("verify", "--strict", "--lock", str(lockp))
+    assert r.returncode == 0 and r.stdout.startswith("ok"), r.stdout + r.stderr
+
+
+def test_I1_modern_only_drift_fails_verify_and_lock(tmp_path):
+    poison = tmp_path / "poison"
+    lockp = lock_evil(tmp_path, "modern-only", poison_file=poison)
+    poison.write_text("rugpull", encoding="utf-8")
+    r = run("verify", "--lock", str(lockp))
+    assert r.returncode == 1 and "DRIFT" in r.stdout, r.stdout + r.stderr
+    # A server that drops the locked version: verify and a fresh lock fail closed,
+    # naming what the server speaks (no fallback to `initialize`).
+    poison.write_text("version", encoding="utf-8")
+    r = run("verify", "--lock", str(lockp))
+    assert r.returncode != 0 and "2099-01-01" in r.stderr, r.stdout + r.stderr
+    other = tmp_path / "other.lock"
+    r = run("lock", "--lock", str(other), "--name", "evil", "--",
+            sys.executable, EVIL, "--mode", "modern-only", "--poison-file", str(poison))
+    assert r.returncode != 0 and "2099-01-01" in r.stderr and not other.exists(), r.stderr
+    assert "initialize" not in [m for m, _ in modern_requests(r.stderr)]
+
+
 # ------------------------------------------------- I7: fail closed
 
 def test_I7_spoofed_and_duplicate_responses_are_dropped(tmp_path, client_factory):

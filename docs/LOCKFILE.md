@@ -1,4 +1,4 @@
-# `mcp.lock` format (version 1)
+# `mcp.lock` format (versions 1 and 2)
 
 `mcp.lock` is the reviewed, pinned MCP surface of each server. Commit it to
 git and review changes to it the way you would review code. mcpsum writes it
@@ -48,12 +48,13 @@ use a lockfile whose digests do not match its contents.
 
 | Field | Meaning |
 |---|---|
-| `lockfileVersion` | Format version. Currently `1`. Unknown versions are rejected. |
+| `lockfileVersion` | Format version, `1` or `2`. mcpsum writes `1` unless an entry needs `2` (a [2026-07-28 server](#protocol-era)), so a lockfile without such a server stays readable by mcpsum 0.2.0 and older. Any other version, and a version-1 file with a `supportedVersions` entry, are rejected. |
 | `generator` | The mcpsum version that wrote the file. Informational. |
 | `servers.<name>` | One entry per server. `<name>` is what you pass to `--name` and use in your client config. |
 | `command` | The exact argv the proxy runs. **The proxy never takes a command from the client config**, so the config and the lock cannot silently diverge. Pin package versions here (`pkg==1.2.3`, `pkg@1.2.3`). |
 | `envPassthrough` | **Names** of environment variables passed to the server. Values are never stored. Everything else is withheld. |
 | `protocolVersion`, `serverInfo`, `capabilities`, `instructions` | What the server reported at lock time. Served to the client from here. Changes count as *informational* drift, except `instructions`, which is definitional. |
+| `supportedVersions` | Only for a server locked over 2026-07-28 `server/discover` (version 2): the versions it listed. `protocolVersion` is then the one mcpsum picked and sends in every request's `_meta`. See [Protocol era](#protocol-era). |
 | `tools`, `prompts`, `resources`, `resourceTemplates` | The full definitions as returned by the server (all pages), keyed by `name`, `name`, `uri` and `uriTemplate`. Served to the client from here. Capped at 1,000 items per kind. |
 | `policy` | Optional, written by **you** (never by the server): taint labels ([I6](#policy-optional-i6)) and a sandbox ([I5](#sandbox-optional-i5)). Not covered by `digests`, and kept when the server is re-locked. |
 | `digests` | SHA-256 over the RFC 8785 canonical JSON of each item, plus one over the whole surface. mcpsum recomputes them on load and refuses a lockfile that does not match. |
@@ -128,12 +129,38 @@ Windows a server with a sandbox policy does not start. See
 [I5](GUARANTEES.md#i5--the-server-process-is-sandboxed-opt-in-linux)
 (including the one-time AppArmor step on Ubuntu ≥ 23.10 for `network.allow`).
 
+## Protocol era
+
+MCP [2026-07-28](https://modelcontextprotocol.io/specification/2026-07-28/changelog)
+drops the `initialize` handshake: every request names its version in `_meta`.
+`mcpsum lock` detects which era a server speaks the way the spec asks a client
+that supports both to do it on stdio
+([backward compatibility](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/stdio#backward-compatibility)):
+
+1. It sends [`server/discover`](https://modelcontextprotocol.io/specification/2026-07-28/server/discover)
+   with version `2026-07-28` in `_meta`, no client capabilities and its own
+   `clientInfo`. A `DiscoverResult` that lists `2026-07-28` makes the entry
+   modern: `protocolVersion` is `2026-07-28`, `supportedVersions` records the
+   list, and the file becomes version 2.
+2. A recognized 2026-07-28 error (`-32021`, `-32022`), a `DiscoverResult`
+   without `2026-07-28`, without `serverInfo` in `_meta` or with a
+   `resultType` other than `complete` fails the lock (no fallback).
+3. Any other error, or no answer within `--timeout-secs`, means a legacy
+   server: mcpsum falls back to `initialize`, as before.
+
+The era is part of the entry. `verify` and a re-lock ask an existing entry in
+its own era first, so a server that speaks both eras keeps the era it was
+locked in; to move such an entry to 2026-07-28, delete it and lock again.
+
 ## Drift classes
 
 | Class | What changed | `verify` | `proxy` |
 |---|---|---|---|
-| Definitional | any tool, prompt, resource or template added, removed or changed; `instructions` | exit 1 | quarantine (`-32002` for every later request) |
-| Informational | `serverInfo`, `capabilities`, `protocolVersion` | reported, exit 0 (exit 1 with `--strict`) | allowed; the client still sees the locked values |
+| Definitional | any tool, prompt, resource or template added, removed or changed; `instructions`; the protocol era (`initialize` vs. `server/discover`) | exit 1 | quarantine (`-32002` for every later request) |
+| Informational | `serverInfo`, `capabilities`, `protocolVersion`, `supportedVersions` | reported, exit 0 (exit 1 with `--strict`) | allowed; the client still sees the locked values |
+
+A 2026-07-28 server that no longer lists the locked `protocolVersion` cannot
+be spoken to as locked: `verify` and `lock` fail.
 
 ## Integrity is not authenticity
 

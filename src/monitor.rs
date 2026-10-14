@@ -35,10 +35,19 @@ pub const QUARANTINED: i64 = -32002;
 /// 2026-07-28 `UnsupportedProtocolVersionError`.
 pub const UNSUPPORTED_PROTOCOL_VERSION: i64 = -32022;
 /// Modern (per-request `_meta`, no `initialize`) revisions mcpsum serves to
-/// clients. Upstream it still opens a legacy session (I1: the lock's surface).
+/// clients and probes servers with. Upstream the proxy still opens a legacy
+/// session (I1: the lock's surface).
 pub const MODERN_VERSIONS: [&str; 1] = ["2026-07-28"];
 const META_VERSION: &str = "io.modelcontextprotocol/protocolVersion";
-const META_SERVER_INFO: &str = "io.modelcontextprotocol/serverInfo";
+pub const META_SERVER_INFO: &str = "io.modelcontextprotocol/serverInfo";
+
+/// The `_meta` of every request mcpsum sends a 2026-07-28 server: the locked
+/// version, no client capabilities and mcpsum's own identity (I3). Nothing
+/// the client declared is forwarded.
+pub fn modern_meta(version: &str, client: &str) -> Value {
+    json!({META_VERSION: version, "io.modelcontextprotocol/clientCapabilities": {},
+        "io.modelcontextprotocol/clientInfo": {"name": client, "version": env!("CARGO_PKG_VERSION")}})
+}
 
 #[derive(Debug, Clone)]
 pub struct Policy {
@@ -1711,6 +1720,7 @@ mod tests {
     pub(crate) fn surface() -> Surface {
         Surface {
             protocol_version: "2025-06-18".into(),
+            supported_versions: None,
             server_info: json!({"name": "demo", "version": "1.0.0"}),
             instructions: Some("Arithmetic helper.".into()),
             capabilities: json!({"tools": {"listChanged": true}, "prompts": {}, "resources": {"subscribe": true}, "logging": {}}),

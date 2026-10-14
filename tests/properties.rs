@@ -38,6 +38,7 @@ const SRV: &str = "§SRV§";
 fn surface() -> Surface {
     Surface {
         protocol_version: "2025-06-18".into(),
+        supported_versions: None,
         server_info: json!({"name": "demo", "version": "1.0.0"}),
         instructions: Some("Arithmetic helper.".into()),
         capabilities: json!({"tools": {"listChanged": true}, "prompts": {}, "resources": {}}),
