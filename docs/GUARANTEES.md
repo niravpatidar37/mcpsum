@@ -41,6 +41,13 @@ definitions only to *compare* them with the lock. On any definitional
 difference the server is quarantined, and every later request is refused with
 `-32002`.
 
+A server locked over 2026-07-28 (see [Protocol era](LOCKFILE.md#protocol-era))
+never gets `initialize`: mcpsum answers a legacy client's `initialize` from
+the lock, opens the server with its own `server/discover`, and forwards no
+call until the server still lists the locked protocol version, reports the
+locked `instructions` and returns the locked definitions. Results reach a
+legacy client without the 2026-07-28 `resultType` and `serverInfo` fields.
+
 Server text reaches the client in exactly four places: the results of the
 three pass-through methods (`tools/call`, `prompts/get`, `resources/read`) and
 `notifications/progress` messages for a token the client issued.
@@ -64,13 +71,23 @@ monitor never forwards one.
 `i1_served_capabilities_never_advertise_list_changed_logging_or_completions`,
 `i1_modern_discover_served_from_lock_and_upstream_opened_legacy_without_client_caps`,
 `i1_modern_call_waits_for_verification_and_result_is_rewritten`,
-`i1_modern_session_quarantines_on_instruction_drift`.
+`i1_modern_session_quarantines_on_instruction_drift`,
+`i1_modern_upstream_is_opened_with_discover_and_verified_before_any_call`,
+`i1_legacy_client_before_modern_upstream_is_answered_from_the_lock`,
+`i1_modern_upstream_drift_version_loss_or_input_request_at_discover_quarantines`.
 e2e: `test_I1_modern_discover_served_from_lock_server_discover_never_consulted`,
 `test_I1_modern_client_after_rugpull_is_quarantined`, `test_I1_rugpull_between_sessions_never_reaches_model_and_quarantines`,
+`test_I1_modern_only_rugpull_after_lock_quarantines`,
+`test_I1_modern_only_server_is_proxied_for_both_client_eras`,
+`test_I7_modern_only_server_that_drops_the_locked_version_is_quarantined`,
+`test_modern_only_server_is_locked_and_verified`,
+`test_I1_modern_only_drift_fails_verify_and_lock`,
+`test_era_is_probed_with_discover_first_and_a_locked_era_is_kept`,
 `test_I1_inline_rugpull_after_list_changed_quarantines`,
 `test_I1_poisoned_instructions_never_reach_client`,
-`test_I1_full_schema_poisoning_is_detected`.
-Property: invariant I1 in `tests/properties.rs`.
+`test_I1_full_schema_poisoning_is_detected`;
+interop: `test_official_sdk_2026_07_28_server_is_locked_verified_and_proxied_as_modern`.
+Property: invariant I1 in `tests/properties.rs`, also with a 2026-07-28 server.
 
 ## I2 — Calls are limited to locked items and strict locked schemas
 
@@ -115,7 +132,10 @@ notification forwarded is `notifications/progress`, for a token the client
 issued. The client's `sampling`, `elicitation` and `roots` capabilities are
 withheld from the server during `initialize`; for a 2026-07-28 client mcpsum
 opens the upstream session itself, with no client capabilities, and never
-forwards per-request `_meta`. A 2026-07-28 *input request* (a result with
+forwards per-request `_meta`. Every request to a 2026-07-28 server carries
+only mcpsum's own `_meta`: the locked protocol version, empty
+`clientCapabilities`, mcpsum's `clientInfo` and, on a call, the
+`progressToken` mcpsum checked. A 2026-07-28 *input request* (a result with
 `resultType` other than `complete`, which carries elicitation, sampling or
 roots requests) is refused with `-32001`.
 
@@ -130,11 +150,13 @@ cannot use them.
 `i3_unknown_client_method_denied_and_logging_notifications_dropped`.
 e2e: `test_I3_server_initiated_requests_never_reach_client`,
 `test_I3_discover_without_modern_meta_is_denied_by_default`,
-`test_I3_input_required_result_is_refused`;
+`test_I3_input_required_result_is_refused`,
+`test_I3_modern_only_input_required_never_reaches_client`;
 unit: `i3_input_required_result_is_refused_not_forwarded`,
 `i3_modern_discover_after_legacy_initialize_is_denied`,
 `i7_modern_unsupported_or_missing_version_is_rejected_and_never_forwarded`.
-Property: invariant I3, also from a session a modern client opened.
+Property: invariant I3, also from a session a modern client opened, and every
+request to a 2026-07-28 server carries only mcpsum's `_meta`.
 
 ## I5 — The server process is sandboxed (opt-in, Linux)
 
@@ -457,12 +479,21 @@ What mcpsum does **not** protect against today:
    tested and fuzzed. That reduces the risk; it does not eliminate it. Please
    report bypasses: see [SECURITY.md](../SECURITY.md).
 7. **Protocol revisions.** mcpsum speaks stdio only (no HTTP transport).
-   Clients may use revisions up to 2025-11-25 (`initialize`) or
+   Clients and servers may use revisions up to 2025-11-25 (`initialize`) or
    [2026-07-28](https://modelcontextprotocol.io/specification/2026-07-28/changelog)
    (per-request `_meta`, [`server/discover`](https://modelcontextprotocol.io/specification/2026-07-28/server/discover)).
-   Upstream, mcpsum always opens a legacy `initialize` session at the locked
-   revision, so a server that speaks *only* 2026-07-28 cannot be locked or
-   proxied yet. The new 2026-07-28 features are denied: multi round-trip
+   A server's era is detected once, by `lock`, per the spec's
+   [stdio backward-compatibility rules](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/stdio#backward-compatibility),
+   and fixed in the lock; the proxy never falls back, so a server that
+   changes era or drops the locked version gets no call until it is locked
+   again. Of the modern revisions mcpsum speaks only 2026-07-28. A 2026-07-28
+   server must name itself (`serverInfo` in the `DiscoverResult`, a SHOULD in
+   the spec) or it is not locked. A legacy server that never answers
+   `server/discover` delays `lock` by `--timeout-secs`. mcpsum does not open
+   `subscriptions/listen`, so a 2026-07-28 server cannot announce list
+   changes: new definitions are caught when the next session opens (calls
+   still reach only locked tools with locked schemas). The new 2026-07-28
+   features are denied: multi round-trip
    input requests, `subscriptions/listen`, the tasks extension and
    capability `extensions`. mcpsum's approval prompt (I6) is a
    server-initiated request, which 2026-07-28 clients do not take, so a

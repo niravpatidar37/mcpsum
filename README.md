@@ -202,25 +202,26 @@ Read this before you rely on mcpsum. Details: [GUARANTEES.md § Limits](docs/GUA
   that a tool returns can still reach the model. With a taint policy (I6, opt-in) it can't
   silently trigger a sink on any server of the session, but an agent with its own unmediated
   shell tool can still bypass that.
-- **stdio only** for now. No remote/HTTP transport yet. 2026-07-28 clients work (mcpsum
-  answers `server/discover` from the lock), but the upstream server must still accept
-  `initialize`; see [Limits](docs/GUARANTEES.md#limits).
+- **stdio only** for now. No remote/HTTP transport yet. Clients and servers may speak
+  either MCP era: `initialize` (2025-11-25 and earlier) or 2026-07-28 (per-request `_meta`,
+  `server/discover`). A server's era is detected by `lock` and fixed in `mcp.lock`; see
+  [Limits](docs/GUARANTEES.md#limits).
 
 ## How it is verified
 
-- **140+ unit tests** (143 on Windows, 149 on Linux, where the sandbox layers are tested too)
+- **140+ unit tests** (146 on Windows, 152 on Linux, where the sandbox layers are tested too)
   across the monitor, lockfile, audit log, framing, rendering, sandbox, egress proxy, process
   and proxy.
-- **Property tests**: 12,000 random adversarial sessions per run, checked after every
+- **Property tests**: 15,000 random adversarial sessions per run, checked after every
   step against an independent oracle. The first run found a real I1 gap, which was then
   fixed (#4).
 - **Adversarial e2e suite**: the real binary against a [malicious MCP server](e2e/servers/evil_server.py)
   with 19 behaviour modes (rug pulls, schema smuggling, poisoned instructions, sampling,
   elicitation, spoofed ids, garbage, env theft, a wedged pipe, terminal escapes, version
   bumps, process forks, taint, sandbox and egress escapes, multi round-trip input
-  requests, a 2026-07-28-only server and a dual-era one): 44 test cases on Linux and Windows.
+  requests, a 2026-07-28-only server and a dual-era one): 48 test cases on Linux and Windows.
 - **Interop**: the official MCP Python SDK through mcpsum to official reference servers
-  (`mcp-server-time`, `server-everything`).
+  (`mcp-server-time`, `server-everything`) and to a 2026-07-28 server built on the SDK.
 - **Fuzzing**: five libFuzzer targets (monitor sessions, lockfile parsing, framing,
   escaping, egress proxy requests) on PRs and nightly.
 - **Supply chain**: pinned Actions, `cargo-deny` (licenses, advisories, sources),

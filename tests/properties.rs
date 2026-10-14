@@ -13,7 +13,10 @@
 //!   I2  every forwarded tools/call names a locked tool and carries arguments
 //!       valid under the strict locked schema (checked by a hand-written oracle).
 //!   I3  no server-initiated request ever reaches the client; the only
-//!       notification the client ever receives is notifications/progress.
+//!       notification the client ever receives is notifications/progress. A
+//!       2026-07-28 server never gets `initialize`, and every request to it
+//!       carries only mcpsum's own `_meta` (locked version, no client
+//!       capabilities, mcpsum's clientInfo).
 //!   I6  (with a taint policy) once server text from a source request has
 //!       reached the client, a sink call reaches the server only in the step
 //!       where the user explicitly allowed exactly that call; the taint is
@@ -54,6 +57,16 @@ fn surface() -> Surface {
 
 fn lock() -> ServerLock {
     ServerLock::from_surface(vec!["demo".into()], vec![], surface()).unwrap()
+}
+
+/// The same surface, locked over 2026-07-28 `server/discover`.
+fn modern_lock() -> ServerLock {
+    let s = Surface {
+        protocol_version: "2026-07-28".into(),
+        supported_versions: Some(vec!["2026-07-28".into()]),
+        ..surface()
+    };
+    ServerLock::from_surface(vec!["demo".into()], vec![], s).unwrap()
 }
 
 /// Same surface with an I6 policy: `noargs` and every resource read are
@@ -271,6 +284,8 @@ struct Harness {
     /// earliest of these with matching arguments. Never a `HashMap`: its
     /// iteration order is random and calls with equal arguments are common.
     unprompted_sinks: Vec<(Value, Value)>,
+    /// The lock is for a 2026-07-28 server.
+    modern_upstream: bool,
 }
 
 fn key(id: &Value) -> String {
@@ -288,7 +303,6 @@ impl Harness {
 
     fn with_lock(l: ServerLock, with_policy: bool) -> Self {
         Self {
-            m: Monitor::new(l, Policy::default()),
             next_client_id: 1,
             open: HashMap::new(),
             answered: HashSet::new(),
@@ -302,6 +316,8 @@ impl Harness {
             prompts: Vec::new(),
             allowed_now: None,
             unprompted_sinks: Vec::new(),
+            modern_upstream: l.surface.supported_versions.is_some(),
+            m: Monitor::new(l, Policy::default()),
         }
     }
 
@@ -357,6 +373,12 @@ impl Harness {
             }
             (Payload::Poisoned, "initialize") => {
                 json!({"protocolVersion": "2025-06-18", "capabilities": {"tools": {}, "experimental": EVIL}, "serverInfo": {"name": EVIL}, "instructions": EVIL})
+            }
+            (Payload::Clean, "server/discover") => {
+                json!({"resultType": "complete", "supportedVersions": ["2026-07-28"], "capabilities": s.capabilities, "instructions": s.instructions, "_meta": {"io.modelcontextprotocol/serverInfo": s.server_info}})
+            }
+            (Payload::Poisoned, "server/discover") => {
+                json!({"resultType": "complete", "supportedVersions": [EVIL], "capabilities": {"tools": {}, "extensions": {EVIL: {}}}, "instructions": EVIL, "_meta": {"io.modelcontextprotocol/serverInfo": {"name": EVIL}}})
             }
             (Payload::Clean, "tools/list") => json!({"tools": s.tools}),
             (Payload::Clean, "prompts/list") => json!({"prompts": s.prompts}),
@@ -589,6 +611,27 @@ impl Harness {
                             );
                         }
                     }
+                    // I3: a 2026-07-28 server gets mcpsum's own `_meta` on every
+                    // request, never `initialize` or anything the client declared.
+                    if self.modern_upstream {
+                        prop_assert!(method != "initialize" && method != "notifications/initialized", "{v}");
+                        if is_request {
+                            let meta = &v["params"]["_meta"];
+                            prop_assert_eq!(
+                                &meta["io.modelcontextprotocol/protocolVersion"],
+                                &json!("2026-07-28"),
+                                "{}",
+                                v
+                            );
+                            prop_assert_eq!(&meta["io.modelcontextprotocol/clientCapabilities"], &json!({}), "{}", v);
+                            prop_assert_eq!(
+                                &meta["io.modelcontextprotocol/clientInfo"]["name"],
+                                &json!("mcpsum"),
+                                "{}",
+                                v
+                            );
+                        }
+                    }
                     if is_request {
                         self.server_pending.push((v["id"].clone(), method.to_string()));
                     }
@@ -632,6 +675,20 @@ proptest! {
     fn invariants_hold_after_modern_discover(ops in proptest::collection::vec(arb_op(), 1..60)) {
         let mut h = Harness::new();
         let mut script = vec![Op::Client(ClientOp::Modern("server/discover"))];
+        script.extend((0..5).map(|_| Op::Server(ServerOp::Respond { k: 0, payload: Payload::Clean })));
+        for op in script.iter().chain(ops.iter()) {
+            let actions = h.apply(op);
+            h.check(&actions)?;
+        }
+    }
+
+    /// A server locked over 2026-07-28 `server/discover`, behind a legacy or a
+    /// modern client; the opening is answered cleanly, then anything goes.
+    #[test]
+    fn invariants_hold_with_a_2026_07_28_server(legacy_client in any::<bool>(), ops in proptest::collection::vec(arb_op(), 1..60)) {
+        let mut h = Harness::with_lock(modern_lock(), false);
+        let first = if legacy_client { ClientOp::Initialize } else { ClientOp::Modern("server/discover") };
+        let mut script = vec![Op::Client(first)];
         script.extend((0..5).map(|_| Op::Server(ServerOp::Respond { k: 0, payload: Payload::Clean })));
         for op in script.iter().chain(ops.iter()) {
             let actions = h.apply(op);

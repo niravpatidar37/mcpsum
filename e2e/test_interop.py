@@ -15,8 +15,10 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import pathlib
 import secrets
 import shutil
+import sys
 
 import pytest
 from mcp import ClientSession, StdioServerParameters
@@ -92,3 +94,25 @@ def test_official_everything_server_cannot_read_unlisted_secrets(tmp_path):
         assert canary not in text and "MCPSUM_INTEROP_SECRET" not in text
 
     asyncio.run(with_session(lockp, "everything", go, env=env))
+
+
+def test_official_sdk_2026_07_28_server_is_locked_verified_and_proxied_as_modern(tmp_path):
+    # The SDK server speaks both eras; the 2026-07-28 stdio probe (`server/discover`
+    # first) locks it as modern, and the proxy then talks 2026-07-28 to it.
+    lockp = lock(tmp_path, "sdk", [sys.executable, str(pathlib.Path(__file__).parent / "servers" / "sdk_server.py")])
+    lf = json.loads(lockp.read_text(encoding="utf-8"))
+    assert (lf["lockfileVersion"], lf["servers"]["sdk"]["protocolVersion"]) == (2, "2026-07-28"), lf
+    r = run("verify", "--strict", "--lock", str(lockp), timeout=300)
+    assert r.returncode == 0, r.stdout + r.stderr
+
+    async def go(s: ClientSession):
+        listed = await s.list_tools()
+        assert [t.name for t in listed.tools] == locked_tool_names(lockp, "sdk") == ["add"]
+        ok = await s.call_tool("add", {"a": 2, "b": 3})
+        assert not ok.is_error and ok.content[0].text == "5"
+        with pytest.raises(MCPError):
+            await s.call_tool("add", {"a": 2, "b": 3, "sidenote": "exfil"})
+
+    asyncio.run(with_session(lockp, "sdk", go))
+    audit = (tmp_path / "sdk.jsonl").read_text(encoding="utf-8")
+    assert "server opened with mcpsum's own server/discover" in audit and "live definitions match" in audit

@@ -150,7 +150,8 @@ that supports both to do it on stdio
 
 The era is part of the entry. `verify` and a re-lock ask an existing entry in
 its own era first, so a server that speaks both eras keeps the era it was
-locked in; to move such an entry to 2026-07-28, delete it and lock again.
+locked in; to move such an entry to 2026-07-28, delete it and lock again. The
+proxy talks to each server only in its locked era.
 
 ## Drift classes
 
@@ -160,7 +161,7 @@ locked in; to move such an entry to 2026-07-28, delete it and lock again.
 | Informational | `serverInfo`, `capabilities`, `protocolVersion`, `supportedVersions` | reported, exit 0 (exit 1 with `--strict`) | allowed; the client still sees the locked values |
 
 A 2026-07-28 server that no longer lists the locked `protocolVersion` cannot
-be spoken to as locked: `verify` and `lock` fail.
+be spoken to as locked: `verify` and `lock` fail and the proxy quarantines it.
 
 ## Integrity is not authenticity
 
