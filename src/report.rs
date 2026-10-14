@@ -38,6 +38,18 @@ fn items(s: &Surface, kind: Kind) -> &Vec<Value> {
     }
 }
 
+/// Protocol version, plus how mcpsum talks to the server.
+fn era(s: &Surface) -> String {
+    match &s.supported_versions {
+        Some(v) => format!(
+            "{} (server/discover; supports {})",
+            escape_untrusted(&s.protocol_version),
+            show(&serde_json::json!(v))
+        ),
+        None => format!("{} (initialize)", escape_untrusted(&s.protocol_version)),
+    }
+}
+
 /// Render the changes between a locked and a live surface.
 pub fn render_changes(locked: &Surface, live: &Surface, changes: &[Change]) -> String {
     let mut out = String::new();
@@ -112,12 +124,10 @@ pub fn render_changes(locked: &Surface, live: &Surface, changes: &[Change]) -> S
                 );
             }
             Change::ProtocolVersionChanged => {
-                let _ = writeln!(
-                    out,
-                    "i protocolVersion changed: {} -> {}",
-                    escape_untrusted(&locked.protocol_version),
-                    escape_untrusted(&live.protocol_version)
-                );
+                let _ = writeln!(out, "i protocolVersion changed: {} -> {}", era(locked), era(live));
+            }
+            Change::EraChanged => {
+                let _ = writeln!(out, "~ protocol era changed: {} -> {}", era(locked), era(live));
             }
         }
     }
@@ -240,6 +250,7 @@ mod tests {
     fn surface(desc: &str) -> Surface {
         Surface {
             protocol_version: "2025-06-18".into(),
+            supported_versions: None,
             server_info: json!({"name": "s", "version": "1"}),
             instructions: None,
             capabilities: json!({"tools": {}}),

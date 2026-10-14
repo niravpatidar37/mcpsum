@@ -19,6 +19,7 @@ fn lock() -> &'static ServerLock {
     LOCK.get_or_init(|| {
         let surface = Surface {
             protocol_version: "2025-06-18".into(),
+            supported_versions: None,
             server_info: json!({"name": "demo", "version": "1"}),
             instructions: Some("x".into()),
             capabilities: json!({"tools": {}, "prompts": {}, "resources": {}}),

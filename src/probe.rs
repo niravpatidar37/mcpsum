@@ -198,6 +198,7 @@ pub fn probe(argv: &[String], env_passthrough: &[String], opts: &ProbeOptions) -
 
     let mut surface = Surface {
         protocol_version,
+        supported_versions: None,
         server_info,
         instructions,
         capabilities: capabilities.clone(),

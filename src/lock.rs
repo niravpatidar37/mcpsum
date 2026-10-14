@@ -11,7 +11,9 @@ use serde_json::Value;
 
 use crate::canon::digest;
 
-pub const LOCKFILE_VERSION: u32 = 1;
+/// Newest format this build reads. Version 2 adds `supportedVersions` (a
+/// 2026-07-28 server); files without such an entry are still written as 1.
+pub const LOCKFILE_VERSION: u32 = 2;
 /// Upper bounds on surface size. A server exceeding them is rejected (fail closed).
 pub const MAX_ITEMS_PER_KIND: usize = 1000;
 
@@ -20,6 +22,11 @@ pub const MAX_ITEMS_PER_KIND: usize = 1000;
 #[serde(rename_all = "camelCase")]
 pub struct Surface {
     pub protocol_version: String,
+    /// Present only for a server locked over 2026-07-28 (`server/discover`):
+    /// the versions it reported. mcpsum then talks to it without
+    /// `initialize`, with `protocol_version` in every request's `_meta`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supported_versions: Option<Vec<String>>,
     pub server_info: Value,
     #[serde(default)]
     pub instructions: Option<String>,
@@ -242,13 +249,25 @@ pub struct LockFile {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Change {
-    Added { kind: Kind, key: String },
-    Removed { kind: Kind, key: String },
-    Changed { kind: Kind, key: String },
+    Added {
+        kind: Kind,
+        key: String,
+    },
+    Removed {
+        kind: Kind,
+        key: String,
+    },
+    Changed {
+        kind: Kind,
+        key: String,
+    },
     InstructionsChanged,
     ServerInfoChanged,
     CapabilitiesChanged,
     ProtocolVersionChanged,
+    /// The server moved between legacy (`initialize`) and 2026-07-28
+    /// (`server/discover`): the proxy cannot talk to it as locked.
+    EraChanged,
 }
 
 impl Change {
@@ -257,7 +276,11 @@ impl Change {
     pub fn is_definitional(&self) -> bool {
         matches!(
             self,
-            Change::Added { .. } | Change::Removed { .. } | Change::Changed { .. } | Change::InstructionsChanged
+            Change::Added { .. }
+                | Change::Removed { .. }
+                | Change::Changed { .. }
+                | Change::InstructionsChanged
+                | Change::EraChanged
         )
     }
 }
@@ -275,6 +298,7 @@ impl std::fmt::Display for Change {
             Change::ServerInfoChanged => f.write_str("serverInfo changed"),
             Change::CapabilitiesChanged => f.write_str("capabilities changed"),
             Change::ProtocolVersionChanged => f.write_str("protocol version changed"),
+            Change::EraChanged => f.write_str("protocol era changed"),
         }
     }
 }
@@ -322,6 +346,12 @@ impl Surface {
         }
         if !self.capabilities.is_object() {
             bail!("capabilities is not an object");
+        }
+        if let Some(sv) = &self.supported_versions {
+            let pv = self.protocol_version.as_str();
+            if !crate::monitor::MODERN_VERSIONS.contains(&pv) || !sv.iter().any(|v| v == pv) {
+                bail!("a 2026-07-28 entry must pin a protocolVersion that mcpsum speaks and the server supports");
+            }
         }
         for kind in KINDS {
             let list = items(self, kind);
@@ -385,7 +415,9 @@ impl Surface {
     /// Every difference between `self` (locked) and `live`.
     pub fn compare(&self, live: &Surface) -> Result<Vec<Change>> {
         let mut out = Vec::new();
-        if self.protocol_version != live.protocol_version {
+        if self.supported_versions.is_some() != live.supported_versions.is_some() {
+            out.push(Change::EraChanged);
+        } else if self.protocol_version != live.protocol_version || self.supported_versions != live.supported_versions {
             out.push(Change::ProtocolVersionChanged);
         }
         if digest(&self.server_info) != digest(&live.server_info) {
@@ -501,7 +533,7 @@ impl ServerLock {
 impl LockFile {
     pub fn new() -> Self {
         Self {
-            lockfile_version: LOCKFILE_VERSION,
+            lockfile_version: 1,
             generator: format!("mcpsum {}", env!("CARGO_PKG_VERSION")),
             servers: BTreeMap::new(),
         }
@@ -509,8 +541,14 @@ impl LockFile {
 
     pub fn parse(text: &str) -> Result<Self> {
         let lf: LockFile = serde_json::from_str(text).context("mcp.lock is not valid lockfile JSON")?;
-        if lf.lockfile_version != LOCKFILE_VERSION {
-            bail!("unsupported lockfileVersion {}", lf.lockfile_version);
+        if !(1..=LOCKFILE_VERSION).contains(&lf.lockfile_version) {
+            bail!(
+                "unsupported lockfileVersion {} (this mcpsum reads 1 to {LOCKFILE_VERSION}; upgrade mcpsum)",
+                lf.lockfile_version
+            );
+        }
+        if lf.lockfile_version < lf.needed_version() {
+            bail!("lockfileVersion 1 cannot describe a 2026-07-28 server (supportedVersions); it needs 2");
         }
         for (name, s) in &lf.servers {
             s.check_integrity().with_context(|| format!("server `{name}`"))?;
@@ -524,8 +562,22 @@ impl LockFile {
         Self::parse(&text)
     }
 
+    /// Lowest format version that can describe these entries.
+    fn needed_version(&self) -> u32 {
+        let modern = self.servers.values().any(|s| s.surface.supported_versions.is_some());
+        if modern {
+            2
+        } else {
+            1
+        }
+    }
+
+    /// Never downgrades a file, and bumps it only when an entry needs it, so
+    /// a lockfile without 2026-07-28 servers stays readable by older mcpsum.
     pub fn to_pretty(&self) -> Result<String> {
-        Ok(serde_json::to_string_pretty(self)? + "\n")
+        let mut lf = self.clone();
+        lf.lockfile_version = lf.lockfile_version.max(lf.needed_version());
+        Ok(serde_json::to_string_pretty(&lf)? + "\n")
     }
 
     pub fn server(&self, name: &str) -> Result<&ServerLock> {
@@ -549,6 +601,7 @@ pub(crate) mod tests {
     pub fn sample_surface() -> Surface {
         Surface {
             protocol_version: "2025-06-18".into(),
+            supported_versions: None,
             server_info: json!({"name": "demo", "version": "1.0.0"}),
             instructions: Some("Use these tools for arithmetic.".into()),
             capabilities: json!({"tools": {"listChanged": true}}),
@@ -831,6 +884,72 @@ pub(crate) mod tests {
             let p = json!({"sandbox": {"network": {"allow": [good]}}});
             LockFile::parse(&with_policy(&sample_lockfile_text(), p)).unwrap();
         }
+    }
+
+    pub fn modern_surface() -> Surface {
+        Surface {
+            protocol_version: "2026-07-28".into(),
+            supported_versions: Some(vec!["2026-07-28".into()]),
+            ..sample_surface()
+        }
+    }
+
+    #[test]
+    fn modern_entry_needs_lockfile_v2_and_v1_files_are_written_unchanged() {
+        // Legacy-only lockfiles stay at version 1, so older mcpsum keeps reading them.
+        let v1 = sample_lockfile_text();
+        assert!(v1.contains("\"lockfileVersion\": 1,") && !v1.contains("supportedVersions"));
+        // A 2026-07-28 entry needs version 2, which older mcpsum rejects (fail closed).
+        let mut lf = LockFile::new();
+        lf.servers.insert(
+            "m".into(),
+            ServerLock::from_surface(vec!["m".into()], vec![], modern_surface()).unwrap(),
+        );
+        let v2 = lf.to_pretty().unwrap();
+        assert!(v2.contains("\"lockfileVersion\": 2,"), "{v2}");
+        let back = LockFile::parse(&v2).unwrap();
+        assert_eq!(
+            back.servers["m"].surface.supported_versions,
+            Some(vec!["2026-07-28".to_string()])
+        );
+        assert_eq!(LockFile::parse(&back.to_pretty().unwrap()).unwrap(), back);
+        // A version-1 file cannot describe a modern entry, and unknown versions are refused.
+        assert!(LockFile::parse(&v2.replace("\"lockfileVersion\": 2,", "\"lockfileVersion\": 1,")).is_err());
+        assert!(LockFile::parse(&v1.replace("\"lockfileVersion\": 1,", "\"lockfileVersion\": 3,")).is_err());
+        assert!(LockFile::parse(&v1.replace("\"lockfileVersion\": 1,", "\"lockfileVersion\": 0,")).is_err());
+    }
+
+    #[test]
+    fn modern_entry_must_pin_a_version_mcpsum_speaks_and_the_server_listed() {
+        for (pv, sv) in [
+            ("2026-07-28", vec!["2027-01-01"]),
+            ("2027-01-01", vec!["2027-01-01"]),
+            ("2026-07-28", vec![]),
+        ] {
+            let s = Surface {
+                protocol_version: pv.into(),
+                supported_versions: Some(sv.iter().map(|v| v.to_string()).collect()),
+                ..sample_surface()
+            };
+            assert!(
+                ServerLock::from_surface(vec!["m".into()], vec![], s).is_err(),
+                "{pv} {sv:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn era_change_is_definitional_and_supported_versions_are_informational() {
+        let legacy = sample_lock();
+        let ch = legacy.surface.compare(&modern_surface()).unwrap();
+        assert!(
+            ch.contains(&Change::EraChanged) && ch.iter().any(Change::is_definitional),
+            "{ch:?}"
+        );
+        let mut more = modern_surface();
+        more.supported_versions = Some(vec!["2026-07-28".into(), "2027-01-01".into()]);
+        let ch = modern_surface().compare(&more).unwrap();
+        assert_eq!(ch, vec![Change::ProtocolVersionChanged]);
     }
 
     #[test]
