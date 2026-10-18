@@ -212,7 +212,9 @@ cannot be enforced:
     (see Limits).
 - **No privilege building.** seccomp refuses new namespaces (`unshare`,
   `setns`, `clone` namespace flags; `clone3` returns `ENOSYS` so libc falls back
-  to `clone`), mounts, `bpf`, keyrings, `ptrace` and `perf_event_open`.
+  to `clone`), mounts, `bpf`, keyrings, `ptrace` and `perf_event_open`. On
+  x86_64, every x32-ABI system call returns `ENOSYS`, as on a kernel without
+  x32, so none of these rules can be bypassed through x32 syscall numbers.
   Landlock scopes signals and abstract Unix sockets on Linux ≥ 6.12.
 - Re-locking and `verify` also run the server inside its sandbox (egress
   decisions go to stderr there). The audit log records the sandbox at start
@@ -275,6 +277,8 @@ and in CI `test_I5_allowlist_fails_closed_under_ubuntu_userns_restriction`.
 Each network layer alone: `i5_seccomp_alone_blocks_tcp_and_udp`,
 `i5_landlock_alone_blocks_tcp_where_the_kernel_supports_it`,
 `i5_seccomp_allowlist_mode_allows_only_tcp_streams`,
+`i5_seccomp_refuses_x32_syscalls`,
+`i5_seccomp_alone_refuses_x32_syscalls_where_the_kernel_has_them`,
 `i5_namespace_alone_has_only_loopback`. The proxy:
 `i5_proxy_tunnels_only_to_listed_destinations_and_audits_each`,
 `i5_proxy_bounds_head_size_time_and_connections`,

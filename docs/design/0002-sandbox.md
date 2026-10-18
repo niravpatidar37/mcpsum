@@ -305,3 +305,12 @@ restriction globally.
   because test binaries change path with every build.
 - Still open: macOS and Windows backends (#45), real-server runs
   (step 4).
+
+## 13. Implementation note: x32 (2026-10-18)
+
+- seccompiler checks only `arch == AUDIT_ARCH_X86_64` and then exact syscall
+  numbers. x32 system calls carry the same arch with `__X32_SYSCALL_BIT`
+  (`0x40000000`) set in the number, so on kernels with `CONFIG_X86_X32_ABI`
+  (the WSL2 kernel has it) they bypassed every rule. A third, hand-written
+  filter on x86_64 returns `ENOSYS` for every number `>= 0x40000000`, which is
+  what a kernel without x32 returns. aarch64 has no x32.

@@ -14,6 +14,13 @@ All notable changes are recorded here. The format follows
   nested objects typed `["object", "null"]` and in object schemas under
   `additionalProperties`/`unevaluatedProperties`. Affects 0.2.0 and earlier
   (GHSA-h84p-xpp4-jghw).
+- I5 (Linux x86_64): a sandboxed server could bypass the seccomp filter through
+  x32-ABI system calls on kernels built with `CONFIG_X86_X32_ABI` (WSL2's kernel, for
+  one). x32 calls carry the x86_64 audit arch and set bit 30 of the syscall number,
+  so the filter's exact x86_64 numbers never matched them: x32 `socket(AF_INET, ...)`
+  reached the network in no-network mode, and x32 `unshare`, `clone` with namespace
+  flags, `ptrace`, `mount`, `bpf` and `io_uring_setup` were not refused either. Every
+  x32 system call now returns `ENOSYS`, as on a kernel without x32.
 
 ### Added
 - `lock` and `verify` for servers that speak only MCP 2026-07-28 (#21). `lock` now
