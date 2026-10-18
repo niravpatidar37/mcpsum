@@ -7,7 +7,7 @@
 
 use std::io::{BufReader, Write};
 use std::process::ChildStdin;
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -26,6 +26,9 @@ pub const PROBE_PROTOCOL_VERSION: &str = "2025-11-25";
 /// `UnsupportedProtocolVersionError`): never a reason to fall back to `initialize`.
 const MODERN_ERRORS: [i64; 2] = [-32021, -32022];
 const MAX_PAGES: usize = 50;
+/// Messages queued for a server that is not reading its stdin. Beyond this
+/// the probe fails instead of waiting: a full pipe must not outlast the timeout.
+const MAX_PENDING_WRITES: usize = 256;
 
 #[derive(Debug, Clone)]
 pub struct ProbeOptions {
@@ -50,7 +53,8 @@ impl Default for ProbeOptions {
 }
 
 struct Session {
-    stdin: ChildStdin,
+    /// Lines for the writer thread (see `spawn_writer`).
+    out: SyncSender<Vec<u8>>,
     rx: Receiver<std::io::Result<Frame>>,
     next_id: u64,
     timeout: Duration,
@@ -59,11 +63,18 @@ struct Session {
 }
 
 impl Session {
+    /// Never blocks: a server that stops reading stdin (a full pipe) would
+    /// otherwise hang the probe past its timeout.
     fn write(&mut self, msg: &Value) -> Result<()> {
         let mut line = serde_json::to_vec(msg)?;
         line.push(b'\n');
-        self.stdin.write_all(&line).context("writing to server")?;
-        self.stdin.flush().context("writing to server")
+        match self.out.try_send(line) {
+            Ok(()) => Ok(()),
+            Err(TrySendError::Full(_)) => {
+                bail!("the server is not reading its input ({MAX_PENDING_WRITES} messages pending)")
+            }
+            Err(TrySendError::Disconnected(_)) => bail!("writing to server: its input is closed"),
+        }
     }
 
     /// Send a request and wait for its response. Server-initiated requests are
@@ -86,7 +97,12 @@ impl Session {
         self.write(&json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}))?;
         let deadline = Instant::now() + self.timeout;
         loop {
+            // Checked first: `recv_timeout` still returns queued messages
+            // once the time is up, so a flooding server would never time out.
             let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Ok(None);
+            }
             let frame = match self.rx.recv_timeout(left) {
                 Ok(f) => f.context("reading from server")?,
                 Err(RecvTimeoutError::Timeout) => return Ok(None),
@@ -318,6 +334,21 @@ fn open(s: &mut Session, prefer_legacy: bool) -> Result<Surface> {
     Ok(surface)
 }
 
+/// Write to the server's stdin on a thread of its own. It may block on a full
+/// pipe, but only until the server's process tree is killed (the probe's
+/// guard does that when it returns): the write then fails and the thread ends.
+fn spawn_writer(mut stdin: ChildStdin) -> SyncSender<Vec<u8>> {
+    let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(MAX_PENDING_WRITES);
+    thread::spawn(move || {
+        for line in rx {
+            if stdin.write_all(&line).and_then(|()| stdin.flush()).is_err() {
+                break;
+            }
+        }
+    });
+    tx
+}
+
 pub fn probe(argv: &[String], env_passthrough: &[String], opts: &ProbeOptions) -> Result<Surface> {
     let mut server = spawn_server(argv, env_passthrough, opts.sandbox.as_ref())?;
     // Declared before `server` is moved into the guard below, so it is dropped
@@ -354,7 +385,7 @@ pub fn probe(argv: &[String], env_passthrough: &[String], opts: &ProbeOptions) -
         }
     });
     let mut s = Session {
-        stdin,
+        out: spawn_writer(stdin),
         rx,
         next_id: 1,
         timeout: opts.timeout,
@@ -442,6 +473,88 @@ mod tests {
         let ask = json!({"resultType": "input_required", "tools": [{"name": "a"}], "inputRequests": {}});
         assert!(list_page("tools/list", "tools", &ask).is_err());
         assert!(list_page("tools/list", "tools", &json!({"resultType": "complete"})).is_err());
+    }
+
+    const FLOOD_ENV: &str = "MCPSUM_TEST_PING_FLOOD";
+
+    /// Child-process helper for the test below; it does nothing unless
+    /// re-executed with FLOOD_ENV set. A server that sends many `ping`
+    /// requests, never reads its stdin and keeps stdout open.
+    #[test]
+    #[ignore = "helper process for probe_honours_its_timeout_when_the_server_never_reads_stdin"]
+    fn ping_flood_server_helper() {
+        if std::env::var_os(FLOOD_ENV).is_none() {
+            return;
+        }
+        let mut out = std::io::BufWriter::new(std::io::stdout().lock());
+        for i in 0..200_000u64 {
+            // The probe stops reading once it gives up: then just exit.
+            if writeln!(out, r#"{{"jsonrpc":"2.0","id":"s{i}","method":"ping"}}"#).is_err() {
+                std::process::exit(0);
+            }
+        }
+        let _ = out.flush();
+        thread::sleep(Duration::from_secs(20));
+    }
+
+    /// `--timeout-secs` bounds the probe (LOCKFILE.md: "no answer within
+    /// `--timeout-secs` means a legacy server"). A server that floods pings and
+    /// never reads stdin fills the pipe with mcpsum's replies; a blocking write
+    /// must not hang `lock`/`verify` past that.
+    #[test]
+    fn probe_honours_its_timeout_when_the_server_never_reads_stdin() {
+        let me = std::env::current_exe().unwrap().to_string_lossy().into_owned();
+        let argv: Vec<String> = [
+            me.as_str(),
+            "probe::tests::ping_flood_server_helper",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let opts = ProbeOptions {
+            timeout: Duration::from_secs(2),
+            ..ProbeOptions::default()
+        };
+        // SAFETY (edition 2021): test-only; the name is unique to this test.
+        // It reaches the child through the scrubbed environment's passthrough.
+        std::env::set_var(FLOOD_ENV, "1");
+        let (tx, rx) = mpsc::channel();
+        let start = Instant::now();
+        thread::spawn(move || {
+            let r = probe(&argv, &[FLOOD_ENV.to_string()], &opts);
+            let _ = tx.send(r.map(|_| ()).map_err(|e| format!("{e:#}")));
+        });
+        let r = rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("probe still blocked after 10 s although its timeout is 2 s");
+        let err = r.expect_err("the flooding server never answers, so the probe fails");
+        assert!(err.contains("not reading its input"), "{err}");
+        assert!(start.elapsed() < Duration::from_secs(10), "{err}");
+    }
+
+    /// The deadline holds however fast the server sends: messages already
+    /// queued when it passes are not read (a flood must not extend the wait).
+    #[test]
+    fn probe_deadline_holds_while_messages_keep_arriving() {
+        let (out, _server_stdin) = mpsc::sync_channel(MAX_PENDING_WRITES);
+        let (feed, rx) = mpsc::channel();
+        let note = br#"{"jsonrpc":"2.0","method":"notifications/message","params":{}}"#;
+        for _ in 0..1000 {
+            feed.send(Ok(Frame::Line(note.to_vec()))).unwrap();
+        }
+        let mut s = Session {
+            out,
+            rx,
+            next_id: 1,
+            timeout: Duration::ZERO,
+            meta: None,
+        };
+        assert!(s.request_or_timeout("tools/list", json!({})).unwrap().is_none());
+        assert_eq!(s.rx.try_iter().count(), 1000, "messages were read after the deadline");
     }
 
     /// 2026-07-28 stdio backward compatibility: a recognized modern error

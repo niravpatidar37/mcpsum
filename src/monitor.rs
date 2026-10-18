@@ -275,6 +275,9 @@ fn error_msg(id: Value, code: i64, message: impl Into<String>) -> Value {
     json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message.into()}})
 }
 
+/// Every audit event goes through here. Method, subject and reason can carry
+/// peer text (client lines up to `max_line_bytes`), so they are truncated:
+/// the log reads back entries of at most 1 MiB, and refuses to write more.
 fn audit(
     dir: Dir,
     method: Option<&str>,
@@ -284,21 +287,29 @@ fn audit(
 ) -> Action {
     Action::Audit(AuditEvent {
         dir,
-        method: method.map(str::to_string),
-        subject: subject.map(str::to_string),
+        method: method.map(|m| truncate(m, 100)),
+        subject: subject.map(|s| truncate(s, 200)),
         decision,
-        reason: reason.into(),
+        reason: truncate(&reason.into(), 1000),
         args_digest: None,
     })
 }
 
 /// Make object schemas reject undeclared properties unless the locked schema
-/// explicitly allows them. Combinator schemas are left untouched because
-/// `additionalProperties: false` inside allOf/anyOf/oneOf changes their meaning.
-/// `not` and `if` are left untouched too: a stricter subschema there matches
-/// less often, which would *widen* what the schema accepts. The strict form is
-/// only ever enforced together with the locked schema as written (see
-/// [`ArgsValidator`]), so a rewrite here can add rules but never remove one.
+/// explicitly allows them. Subschemas that apply to the *same* instance as
+/// their parent are left untouched: `additionalProperties: false` inside
+/// allOf/anyOf/oneOf, `then`/`else` or `dependentSchemas` would reject
+/// properties the parent declares. `not` and `if` are left untouched too: a
+/// stricter subschema there matches less often, which would *widen* what the
+/// schema accepts. The strict form is only ever enforced together with the
+/// locked schema as written (see [`ArgsValidator`]), so a rewrite here can add
+/// rules but never remove one.
+///
+/// `$defs`/`definitions` entries are still made strict (fail closed). An entry
+/// referenced from `properties` describes a separate instance, where strict is
+/// right; one referenced from `allOf`, or by a `$ref` with property-declaring
+/// siblings, describes the same instance, so properties declared beside it are
+/// rejected too (valid calls are denied; nothing undeclared is let through).
 pub fn strictify(schema: &Value) -> Value {
     let Value::Object(m) = schema else {
         return schema.clone();
@@ -306,13 +317,13 @@ pub fn strictify(schema: &Value) -> Value {
     let mut out = Map::new();
     for (k, v) in m {
         let nv = match k.as_str() {
-            "properties" | "patternProperties" | "$defs" | "definitions" | "dependentSchemas" => match v {
+            "properties" | "patternProperties" | "$defs" | "definitions" => match v {
                 Value::Object(props) => {
                     Value::Object(props.iter().map(|(pk, pv)| (pk.clone(), strictify(pv))).collect())
                 }
                 other => other.clone(),
             },
-            "items" | "additionalItems" | "contains" | "then" | "else" | "unevaluatedItems" => match v {
+            "items" | "additionalItems" | "contains" | "unevaluatedItems" => match v {
                 Value::Array(a) => Value::Array(a.iter().map(strictify).collect()),
                 other => strictify(other),
             },
@@ -643,6 +654,13 @@ impl Monitor {
                 INVALID_REQUEST,
                 "mcpsum: jsonrpc must be \"2.0\"",
             )));
+            out.push(audit(
+                Dir::ClientToServer,
+                None,
+                None,
+                Decision::Drop,
+                "bad jsonrpc version",
+            ));
             return out;
         }
         let method = obj.get("method").and_then(Value::as_str).map(str::to_string);
@@ -655,17 +673,27 @@ impl Monitor {
                         INVALID_REQUEST,
                         "mcpsum: invalid request id",
                     )));
+                    out.push(audit(Dir::ClientToServer, None, None, Decision::Drop, "invalid id"));
                     return out;
                 }
                 self.client_request(id, m, params, &mut out);
             }
             (Some(m), None) => self.client_notification(m, params, &mut out),
             (None, Some(id)) => self.client_response(id, obj, &mut out),
-            (None, None) => out.push(Action::ToClient(error_msg(
-                Value::Null,
-                INVALID_REQUEST,
-                "mcpsum: invalid message",
-            ))),
+            (None, None) => {
+                out.push(Action::ToClient(error_msg(
+                    Value::Null,
+                    INVALID_REQUEST,
+                    "mcpsum: invalid message",
+                )));
+                out.push(audit(
+                    Dir::ClientToServer,
+                    None,
+                    None,
+                    Decision::Drop,
+                    "neither method nor id",
+                ));
+            }
         }
         out
     }
@@ -831,6 +859,13 @@ impl Monitor {
                 INVALID_REQUEST,
                 "mcpsum: already initialized",
             )));
+            out.push(audit(
+                Dir::ClientToServer,
+                Some("initialize"),
+                None,
+                Decision::Deny,
+                "already initialized",
+            ));
             return;
         }
         let Some(pv) = params.get("protocolVersion").and_then(Value::as_str) else {
@@ -839,6 +874,13 @@ impl Monitor {
                 INVALID_PARAMS,
                 "mcpsum: initialize requires protocolVersion",
             )));
+            out.push(audit(
+                Dir::ClientToServer,
+                Some("initialize"),
+                None,
+                Decision::Deny,
+                "initialize without protocolVersion",
+            ));
             return;
         };
         let mut fwd = json!({"protocolVersion": pv, "capabilities": {}});
@@ -2409,6 +2451,78 @@ mod tests {
     }
 
     #[test]
+    fn i2_same_instance_applicators_accept_declared_and_deny_undeclared() {
+        // `dependentSchemas` and `then`/`else` describe the same object as their
+        // parent: making them strict rejected properties the parent declares.
+        let dependent = json!({"type": "object",
+            "properties": {"card": {"type": "string"}, "billing": {"type": "string"}},
+            "dependentSchemas": {"card": {"properties": {"billing": {"type": "string"}}, "required": ["billing"]}}});
+        let conditional = json!({"type": "object",
+            "properties": {"mode": {"type": "string"}, "path": {"type": "string"}},
+            "if": {"properties": {"mode": {"const": "write"}}, "required": ["mode"]},
+            "then": {"properties": {"path": {"pattern": "^/tmp/"}}, "required": ["path"]},
+            "else": {"properties": {"path": {"pattern": "^/"}}}});
+        for (schema, valid, rejected) in [
+            (
+                dependent.clone(),
+                json!({"card": "c", "billing": "b"}),
+                json!({"card": "c"}),
+            ),
+            (
+                conditional.clone(),
+                json!({"mode": "write", "path": "/tmp/x"}),
+                json!({"mode": "write", "path": "/etc/x"}),
+            ),
+            (
+                conditional.clone(),
+                json!({"mode": "read", "path": "/etc/x"}),
+                json!({"mode": "read", "path": "etc"}),
+            ),
+        ] {
+            let (mut m, s) = mon_with_tool(schema);
+            handshake(&mut m, &s);
+            assert_eq!(
+                to_server(&call(&mut m, 3, "t", valid.clone())).len(),
+                1,
+                "denied valid {valid}"
+            );
+            assert!(
+                to_server(&call(&mut m, 4, "t", rejected.clone())).is_empty(),
+                "forwarded {rejected}"
+            );
+            let mut extra = valid.clone();
+            extra["sidenote"] = json!("TOPSECRETVALUE");
+            assert!(
+                to_server(&call(&mut m, 5, "t", extra)).is_empty(),
+                "I2: undeclared property forwarded"
+            );
+        }
+        let strict = strictify(&conditional);
+        assert_eq!(
+            (&strict["then"], &strict["else"]),
+            (&conditional["then"], &conditional["else"])
+        );
+        assert_eq!(strictify(&dependent)["dependentSchemas"], dependent["dependentSchemas"]);
+    }
+
+    #[test]
+    fn i2_defs_used_from_allof_stay_strict_and_fail_closed() {
+        // A `$defs` entry may describe a separate instance (from `properties`)
+        // or the same one (from `allOf`/`$ref`); strictify keeps it strict.
+        // Here that alone rejects undeclared top-level properties. Residual,
+        // documented on `strictify`: `extra`, declared by the other `allOf`
+        // member, is rejected too.
+        let schema = json!({"type": "object",
+            "allOf": [{"$ref": "#/$defs/base"}, {"properties": {"extra": {"type": "string"}}}],
+            "$defs": {"base": {"type": "object", "properties": {"a": {"type": "number"}}}}});
+        let (mut m, s) = mon_with_tool(schema);
+        handshake(&mut m, &s);
+        assert_eq!(to_server(&call(&mut m, 3, "t", json!({"a": 1}))).len(), 1);
+        assert!(to_server(&call(&mut m, 4, "t", json!({"a": 1, "sidenote": "TOPSECRETVALUE"}))).is_empty());
+        assert!(to_server(&call(&mut m, 5, "t", json!({"a": 1, "extra": "x"}))).is_empty());
+    }
+
+    #[test]
     fn i2_remote_ref_schema_fails_closed() {
         let mut m = mon();
         handshake(&mut m, &surface());
@@ -2952,6 +3066,35 @@ mod tests {
     }
 
     #[test]
+    fn i8_client_side_rejections_are_audited_without_client_values() {
+        // Every rejection sent back to the client is also a decision for the
+        // log. Reasons are fixed strings: no client-written value is recorded.
+        let canary = "TOPSECRETVALUE";
+        let mut m = mon();
+        let msgs = [
+            json!({"jsonrpc": canary, "id": 1, "method": canary}),
+            json!({"jsonrpc": "2.0", "id": {"x": canary}, "method": canary}),
+            json!({"jsonrpc": "2.0", "params": {"x": canary}}),
+            json!({"jsonrpc": "2.0", "id": 2, "method": "initialize", "params": {"x": canary}}),
+            // a second `initialize`, sent after the handshake below
+            json!({"jsonrpc": "2.0", "id": 3, "method": "initialize", "params": {"protocolVersion": canary}}),
+        ];
+        for (i, msg) in msgs.into_iter().enumerate() {
+            if i == 4 {
+                handshake(&mut m, &surface());
+            }
+            let a = m.on_client_line(&b(msg.clone()));
+            assert!(to_server(&a).is_empty(), "{msg}");
+            assert_eq!(to_client(&a).len(), 1, "{msg}");
+            let ev = audits(&a);
+            assert_eq!(ev.len(), 1, "I8: {msg} rejected without an audit event");
+            assert!(matches!(ev[0].decision, Decision::Deny | Decision::Drop), "{:?}", ev[0]);
+            let logged = serde_json::to_string(&ev).unwrap();
+            assert!(!logged.contains(canary), "client value in the audit log: {logged}");
+        }
+    }
+
+    #[test]
     fn i8_denied_argument_values_never_appear_in_audit_or_error() {
         let mut m = mon();
         handshake(&mut m, &surface());
@@ -2974,6 +3117,41 @@ mod tests {
         let e = audits(&a).into_iter().find(|e| e.decision == Decision::Allow).unwrap();
         assert_eq!(e.subject.as_deref(), Some("add"));
         assert_eq!(e.args_digest, Some(digest(&json!({"a": 1, "b": 2}))));
+    }
+
+    #[test]
+    fn i8_audit_entries_stay_bounded_whatever_the_peer_sends() {
+        // Lines up to 4 MiB are accepted; the audit log reads back entries up
+        // to 1 MiB. Peer-chosen text must reach the log truncated.
+        let long = "x".repeat(2 * 1024 * 1024);
+        let mut events = Vec::new();
+        let mut m = mon();
+        events.extend(audits(&init_caps(&mut m, &surface(), json!({ long.clone(): {} }))));
+        let mut m = mon();
+        handshake(&mut m, &surface());
+        events.extend(audits(&call(&mut m, 1, &long, json!({}))));
+        events.extend(audits(&m.on_client_line(&b(
+            json!({"jsonrpc": "2.0", "id": 2, "method": "prompts/get", "params": {"name": long}}),
+        ))));
+        call(&mut m, 3, "add", json!({"a": 1, "b": 2}));
+        events.extend(audits(&m.on_client_line(&b(
+            json!({"jsonrpc": "2.0", "id": 3, "method": long, "params": {}}),
+        ))));
+        let mut m = mon();
+        events.extend(audits(&m.on_client_line(&b(
+            json!({"jsonrpc": "2.0", "id": 4, "method": long, "params": {"_meta": {META_VERSION: ""}}}),
+        ))));
+        assert!(events.len() >= 5, "{}", events.len());
+        for e in &events {
+            let n = |s: &Option<String>| s.as_deref().map_or(0, |s| s.chars().count());
+            assert!(n(&e.method) <= 100, "method of {} chars", n(&e.method));
+            assert!(n(&e.subject) <= 200, "subject of {} chars", n(&e.subject));
+            assert!(
+                e.reason.chars().count() <= 1000,
+                "reason of {} chars",
+                e.reason.chars().count()
+            );
+        }
     }
 
     // ---------------- I6: taint tracking (design 0001) ----------------
