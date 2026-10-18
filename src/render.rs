@@ -5,6 +5,8 @@
 //! Unicode tag block, variation selectors) used to smuggle hidden instructions.
 
 /// Characters that are invisible, reorder text, or control the terminal.
+/// Covers every Unicode Default_Ignorable_Code_Point, including the reserved
+/// ones, so characters assigned there later are shown too.
 pub fn is_suspicious(c: char) -> bool {
     let u = c as u32;
     matches!(u,
@@ -21,10 +23,14 @@ pub fn is_suspicious(c: char) -> bool {
         | 0x2060..=0x206F                   // word joiner, invisible operators, bidi isolates
         | 0xFE00..=0xFE0F                   // variation selectors
         | 0xFEFF                            // zero-width no-break space / BOM
+        | 0xFFF0..=0xFFF8                   // reserved default-ignorable
         | 0xFFF9..=0xFFFB                   // interlinear annotation
+        | 0x1BCA0..=0x1BCA3                 // shorthand format controls
         | 0x1D173..=0x1D17A                 // musical formatting controls
         | 0xE0000..=0xE007F                 // Unicode tag block (ASCII smuggling)
+        | 0xE0080..=0xE00FF                 // reserved default-ignorable
         | 0xE0100..=0xE01EF                 // variation selectors supplement
+        | 0xE01F0..=0xE0FFF                 // reserved default-ignorable
     )
 }
 
@@ -102,5 +108,67 @@ mod tests {
         let found = suspicious_chars(&s);
         assert!(!found.is_empty());
         assert!(suspicious_chars("plain\ntext").is_empty());
+    }
+
+    /// Every Default_Ignorable_Code_Point range, copied from
+    /// https://www.unicode.org/Public/UCD/latest/ucd/DerivedCoreProperties.txt
+    /// (DerivedCoreProperties-18.0.0.txt, Unicode 18.0.0). These render as
+    /// nothing, so each one must be shown.
+    const DEFAULT_IGNORABLE: &[(u32, u32)] = &[
+        (0x00AD, 0x00AD),
+        (0x034F, 0x034F),
+        (0x061C, 0x061C),
+        (0x115F, 0x1160),
+        (0x17B4, 0x17B5),
+        (0x180B, 0x180D),
+        (0x180E, 0x180E),
+        (0x180F, 0x180F),
+        (0x200B, 0x200F),
+        (0x202A, 0x202E),
+        (0x2060, 0x2064),
+        (0x2065, 0x2065),
+        (0x2066, 0x206F),
+        (0x3164, 0x3164),
+        (0xFE00, 0xFE0F),
+        (0xFEFF, 0xFEFF),
+        (0xFFA0, 0xFFA0),
+        (0xFFF0, 0xFFF8),
+        (0x1BCA0, 0x1BCA3),
+        (0x1D173, 0x1D17A),
+        (0xE0000, 0xE0000),
+        (0xE0001, 0xE0001),
+        (0xE0002, 0xE001F),
+        (0xE0020, 0xE007F),
+        (0xE0080, 0xE00FF),
+        (0xE0100, 0xE01EF),
+        (0xE01F0, 0xE0FFF),
+    ];
+
+    #[test]
+    fn every_default_ignorable_code_point_is_suspicious() {
+        let mut missing = Vec::new();
+        for &(lo, hi) in DEFAULT_IGNORABLE {
+            for u in lo..=hi {
+                let c = char::from_u32(u).unwrap();
+                if !is_suspicious(c) {
+                    missing.push(format!("U+{u:04X}"));
+                }
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "not flagged: {} code points, first {:?}",
+            missing.len(),
+            &missing[..missing.len().min(8)]
+        );
+    }
+
+    #[test]
+    fn shorthand_format_controls_are_visible() {
+        for c in ['\u{1BCA0}', '\u{1BCA1}', '\u{1BCA2}', '\u{1BCA3}'] {
+            let s = format!("a{c}b");
+            assert_eq!(escape_untrusted(&s), format!("a<U+{:04X}>b", c as u32));
+            assert_eq!(suspicious_chars(&s), vec![c]);
+        }
     }
 }

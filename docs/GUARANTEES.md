@@ -378,7 +378,7 @@ recorded before delivery).
 
 - malformed JSON
 - JSON-RPC batches
-- lines over 4 MiB
+- lines over 4 MiB (not counting the LF or CRLF line ending)
 - calls sent before `initialize` completes
 - duplicate in-flight client ids
 - responses that do not match an open request, or that answer one twice
@@ -396,7 +396,9 @@ quarantine it and exit, rather than hang.
 `i7_client_cancel_is_translated_to_proxy_id`,
 `i7_redos_patterns_in_locked_schemas_run_in_linear_time` (catastrophic regexes in locked
 schemas run in linear time or fail closed at compile time),
-`write_ahead_fails_closed_when_audit_cannot_be_written` (`src/proxy.rs`).
+`write_ahead_fails_closed_when_audit_cannot_be_written` (`src/proxy.rs`),
+`i7_framing_buffers_at_most_one_line` (`tests/framing_memory.rs`: a peer that never
+sends a newline cannot make mcpsum buffer more than one line).
 e2e: `test_I7_spoofed_and_duplicate_responses_are_dropped`,
 `test_I7_garbage_oversize_and_log_injection_are_dropped`,
 `test_I7_deaf_server_cannot_hang_proxy_shutdown`. Property: invariant I7.
@@ -423,7 +425,8 @@ can truncate the log, or rewrite all of it. To catch that, anchor the head
 hash somewhere they cannot write.
 
 **Tests.** `i8_allowed_calls_are_audited_with_args_digest_not_args`,
-`i8_denied_argument_values_never_appear_in_audit_or_error`, `audit::tests::*`,
+`i8_denied_argument_values_never_appear_in_audit_or_error`,
+`i8_client_side_rejections_are_audited_without_client_values`, `audit::tests::*`,
 `concurrent_writers_keep_one_valid_chain` (8 writers × 50 appends).
 e2e: `test_I8_audit_log_verifies_and_detects_tampering`,
 `test_I8_two_proxies_for_one_server_keep_one_valid_chain`.
@@ -446,7 +449,8 @@ e2e: `test_I8_audit_log_verifies_and_detects_tampering`,
 - **Safe rendering.** Every server-authored string shown by `lock`, `verify`,
   `show`, or relayed from server stderr is escaped. Control characters,
   bidi overrides (Trojan Source, CVE-2021-42574), zero-width and Unicode
-  tag characters are shown as `<U+XXXX>`. Tests: `render::tests::*`,
+  tag characters, and every other Unicode default-ignorable code point
+  (invisible by definition) are shown as `<U+XXXX>`. Tests: `render::tests::*`,
   `test_server_stderr_cannot_inject_terminal_escapes`.
 
 ## Planned (not yet implemented)
