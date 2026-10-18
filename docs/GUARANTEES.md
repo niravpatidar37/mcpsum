@@ -441,7 +441,8 @@ e2e: `test_I8_audit_log_verifies_and_detects_tampering`,
 - **Safe rendering.** Every server-authored string shown by `lock`, `verify`,
   `show`, or relayed from server stderr is escaped. Control characters,
   bidi overrides (Trojan Source, CVE-2021-42574), zero-width and Unicode
-  tag characters are shown as `<U+XXXX>`. Tests: `render::tests::*`,
+  tag characters, and every other Unicode default-ignorable code point
+  (invisible by definition) are shown as `<U+XXXX>`. Tests: `render::tests::*`,
   `test_server_stderr_cannot_inject_terminal_escapes`.
 
 ## Planned (not yet implemented)

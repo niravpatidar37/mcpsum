@@ -34,6 +34,13 @@ All notable changes are recorded here. The format follows
 - A fresh `lock` of a server that speaks both eras now records it as 2026-07-28.
   Existing entries keep their era.
 
+### Fixed
+- Safe rendering now shows the shorthand format controls U+1BCA0..U+1BCA3 as
+  `<U+XXXX>`. They are invisible and passed through `show`, `lock`/`verify` output and
+  findings unseen. The reserved default-ignorable ranges U+FFF0..U+FFF8,
+  U+E0080..U+E00FF and U+E01F0..U+E0FFF are shown too, so every Unicode 18.0
+  Default_Ignorable_Code_Point is covered, and a test checks the full list.
+
 ## [0.2.0] - 2026-10-13
 
 ### Added
