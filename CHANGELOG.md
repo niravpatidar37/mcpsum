@@ -36,6 +36,11 @@ All notable changes are recorded here. The format follows
   Existing entries keep their era.
 
 ### Fixed
+- `lock` and `verify` keep to `--timeout-secs` when a server floods requests. A server
+  that sent pings and never read its stdin filled the pipe with mcpsum's replies and
+  hung the probe forever; one that kept sending messages could hold it past the
+  timeout. Replies are now written on their own thread (the probe fails once 256 are
+  pending), and messages that arrive after the deadline are no longer read.
 - Safe rendering now shows the shorthand format controls U+1BCA0..U+1BCA3 as
   `<U+XXXX>`. They are invisible and passed through `show`, `lock`/`verify` output and
   findings unseen. The reserved default-ignorable ranges U+FFF0..U+FFF8,
