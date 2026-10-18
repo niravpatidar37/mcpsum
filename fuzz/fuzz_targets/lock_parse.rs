@@ -12,6 +12,13 @@ fuzz_target!(|data: &[u8]| {
             s.check_integrity().expect("parsed lock must be internally consistent");
         }
         let again = LockFile::parse(&lf.to_pretty().unwrap()).expect("round trip");
-        assert_eq!(again, lf);
+        // mcpsum writes the lowest lockfileVersion that fits (docs/LOCKFILE.md):
+        // 2 only when an entry records supportedVersions. Everything else
+        // survives the round trip unchanged.
+        let modern = lf.servers.values().any(|s| s.surface.supported_versions.is_some());
+        assert_eq!(again.lockfile_version, if modern { 2 } else { 1 });
+        let mut expected = lf;
+        expected.lockfile_version = again.lockfile_version;
+        assert_eq!(again, expected);
     }
 });
