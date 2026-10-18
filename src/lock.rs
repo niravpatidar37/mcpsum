@@ -164,6 +164,29 @@ pub struct NetPolicy {
     pub allow: Vec<String>,
 }
 
+/// A server name names its audit log, `<lock dir>/.mcpsum-audit/<name>.jsonl`,
+/// so it must stay inside that directory on every OS (lockfiles are shared
+/// across OSes). `/` separates subdirectories (`@scope/x`); every segment is a
+/// plain file name: not empty, `.` or `..`, not ending in `.` or a space
+/// (Windows drops those, so `.. ` means `..`), with no `\`, `:` (Windows
+/// drive or stream) or control characters.
+pub fn check_server_name(name: &str) -> Result<()> {
+    let bad_char = name.chars().any(|c| c.is_control() || c == '\\' || c == ':');
+    let bad_segment = name
+        .split('/')
+        .any(|s| s.is_empty() || s.ends_with('.') || s.ends_with(' '));
+    let plain = std::path::Path::new(name)
+        .components()
+        .all(|c| matches!(c, std::path::Component::Normal(_)));
+    if bad_char || bad_segment || !plain {
+        bail!(
+            "invalid server name {name:?}: use `/`-separated segments that are not empty, `.` or `..`, \
+             do not end in `.` or a space, and contain no `\\`, `:` or control characters"
+        );
+    }
+    Ok(())
+}
+
 /// Placeholder for the server's private temporary directory.
 pub const TMP_VAR: &str = "${TMP}";
 
@@ -551,6 +574,7 @@ impl LockFile {
             bail!("lockfileVersion 1 cannot describe a 2026-07-28 server (supportedVersions); it needs 2");
         }
         for (name, s) in &lf.servers {
+            check_server_name(name)?;
             s.check_integrity().with_context(|| format!("server `{name}`"))?;
             s.check_policy().with_context(|| format!("server `{name}`"))?;
         }
@@ -718,6 +742,55 @@ pub(crate) mod tests {
         let s = c.to_string();
         assert!(s.starts_with("resource template \""), "{s}");
         assert!(!s.contains('\n') && !s.contains('\u{202e}'), "{s:?}");
+    }
+
+    /// Names that would put `.mcpsum-audit/<name>.jsonl` somewhere else on
+    /// some OS (lockfiles are shared across OSes).
+    pub const ESCAPING_NAMES: &[&str] = &[
+        "",
+        ".",
+        "..",
+        "../../outside",
+        "a/../b",
+        "a/./b",
+        "/abs/elsewhere",
+        "a//b",
+        "a/",
+        "C:elsewhere",
+        "x:y",
+        "server:stream",
+        "a\\b",
+        "\\\\host\\share",
+        ".. /x",
+        "../",
+        "x.",
+        "x ",
+        "a\u{7}b",
+    ];
+    /// Names that stay inside it, including scoped ones (a subdirectory).
+    pub const SAFE_NAMES: &[&str] = &[
+        "time",
+        "demo-server",
+        "my_server.v2",
+        "@scope/x",
+        "a b",
+        ".hidden",
+        "a/b/c",
+    ];
+
+    #[test]
+    fn lockfile_with_an_escaping_server_name_is_refused() {
+        for name in ESCAPING_NAMES {
+            let mut lf = LockFile::new();
+            lf.servers.insert(name.to_string(), sample_lock());
+            let r = LockFile::parse(&lf.to_pretty().unwrap());
+            assert!(r.is_err(), "server name {name:?} was accepted");
+        }
+        for name in SAFE_NAMES {
+            let mut lf = LockFile::new();
+            lf.servers.insert(name.to_string(), sample_lock());
+            LockFile::parse(&lf.to_pretty().unwrap()).unwrap_or_else(|e| panic!("{name:?}: {e:#}"));
+        }
     }
 
     #[test]

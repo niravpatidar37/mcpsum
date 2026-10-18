@@ -403,7 +403,8 @@ Fuzz: `monitor_session`, `framing`, `lock_parse`.
 to a JSON Lines log at `<lock dir>/.mcpsum-audit/<name>.jsonl`. Each entry
 includes the SHA-256 of the previous one, starting from an all-zero genesis
 hash. `mcpsum audit-verify` recomputes the chain and reports the first entry
-that was edited, inserted or deleted.
+that was edited, inserted or deleted. A server name that would put the log
+outside `.mcpsum-audit/` is refused ([LOCKFILE.md](LOCKFILE.md#fields)).
 
 Several proxies may write the same log at once (VS Code runs MCP servers in two
 processes): every append takes an exclusive cross-process lock, re-reads the chain

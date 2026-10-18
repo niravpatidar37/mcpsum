@@ -14,6 +14,14 @@ All notable changes are recorded here. The format follows
   nested objects typed `["object", "null"]` and in object schemas under
   `additionalProperties`/`unevaluatedProperties`. Affects 0.2.0 and earlier
   (GHSA-h84p-xpp4-jghw).
+- I8: a server name could move its audit log out of `.mcpsum-audit/`. `lock` refused
+  only empty names and control characters, and lockfiles were not checked at all, so
+  `../../x`, `/abs/x` or (on Windows) `C:x` wrote the log elsewhere, including over
+  files the user can write. `lock`, loading a lockfile and the proxy now refuse a name
+  unless every `/`-separated segment is a plain file name (not empty, `.` or `..`, not
+  ending in `.` or a space, no `\`, `:` or control characters). Scoped names such as
+  `@scope/x` keep working. A lockfile with such a name must be re-locked under a valid
+  name.
 
 ### Added
 - `lock` and `verify` for servers that speak only MCP 2026-07-28 (#21). `lock` now

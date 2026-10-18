@@ -6,7 +6,7 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 
 use mcpsum::audit::verify_chain;
-use mcpsum::lock::{suggest_taint_policy, Change, LockFile, ServerLock};
+use mcpsum::lock::{check_server_name, suggest_taint_policy, Change, LockFile, ServerLock};
 use mcpsum::monitor::Policy;
 use mcpsum::probe::{probe, ProbeOptions};
 use mcpsum::process::validate_env_names;
@@ -203,9 +203,7 @@ fn cmd_lock(
     command: Vec<String>,
 ) -> Result<u8> {
     validate_env_names(&env)?;
-    if name.is_empty() || name.chars().any(|c| c.is_control()) {
-        bail!("invalid server name");
-    }
+    check_server_name(name)?;
     let mut lf = load_or_new(lock)?;
     eprintln!(
         "mcpsum: probing `{}` (scrubbed environment; no sandbox yet)",
@@ -473,5 +471,28 @@ fn cmd_sandbox_exec(spec: &str, command: &[String]) -> Result<u8> {
     {
         let _ = (spec, command);
         bail!("sandboxes are enforced on Linux only so far; refusing to start the server")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lock_refuses_a_server_name_that_leaves_the_audit_dir() {
+        let d = std::env::temp_dir().join(format!("mcpsum-main-name-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let lock = d.join("mcp.lock");
+        let r = cmd_lock(
+            &lock,
+            "../../outside",
+            vec![],
+            1,
+            false,
+            vec!["mcpsum-no-such-server".into()],
+        );
+        let _ = std::fs::remove_dir_all(&d);
+        let e = format!("{:#}", r.unwrap_err());
+        assert!(e.contains("invalid server name"), "{e}");
     }
 }
