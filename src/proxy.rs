@@ -20,7 +20,7 @@ use serde_json::Value;
 use crate::audit::{AppendAudit, AuditFile};
 use crate::egress::{system_resolver, Allowlist, AuditSink, Egress, EgressHandle, Limits};
 use crate::framing::{BoundedLines, Frame};
-use crate::lock::LockFile;
+use crate::lock::{check_server_name, LockFile};
 use crate::monitor::{Action, AuditEvent, Decision, Dir, Monitor, Policy};
 use crate::process::{relay_stderr, spawn_server, ServerProcess};
 use crate::render::escape_untrusted;
@@ -105,12 +105,15 @@ pub fn open_audit(path: &Path, server: &str) -> Result<AuditFile> {
     AuditFile::open(path, server)
 }
 
-pub fn default_audit_path(lock_path: &Path, server: &str) -> PathBuf {
+/// `<lock dir>/.mcpsum-audit/<server>.jsonl`; refuses a name that would put
+/// the log anywhere else (see [`check_server_name`]).
+pub fn default_audit_path(lock_path: &Path, server: &str) -> Result<PathBuf> {
+    check_server_name(server)?;
     let dir = lock_path
         .parent()
         .filter(|d| !d.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
-    dir.join(".mcpsum-audit").join(format!("{server}.jsonl"))
+    Ok(dir.join(".mcpsum-audit").join(format!("{server}.jsonl")))
 }
 
 fn write_line(w: &mut impl Write, v: &Value) -> std::io::Result<()> {
@@ -153,7 +156,10 @@ pub fn run_proxy(
     let server = lockfile.server(name)?.clone();
     let has_taint_policy = server.policy.as_ref().is_some_and(|p| p.taint.is_some());
     let taint_store = open_taint_store(has_taint_policy, session)?;
-    let audit_path = audit_path.unwrap_or_else(|| default_audit_path(lock_path, name));
+    let audit_path = match audit_path {
+        Some(p) => p,
+        None => default_audit_path(lock_path, name)?,
+    };
     // Shared with the egress proxy's threads (I5 allowlist mode).
     let audit = Arc::new(Mutex::new(open_audit(&audit_path, name)?));
     let max = policy.max_line_bytes;
@@ -502,6 +508,40 @@ mod tests {
         let (n, _) = verify_chain(&text).unwrap_or_else(|e| panic!("chain forked: {e}"));
         assert_eq!(n, writers * per);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn default_audit_path_stays_inside_the_audit_dir() {
+        // GUARANTEES.md I8: the log lives at `<lock dir>/.mcpsum-audit/<name>.jsonl`.
+        use crate::lock::tests::{ESCAPING_NAMES, SAFE_NAMES};
+        let lock = Path::new("proj").join("mcp.lock");
+        let base = Path::new("proj").join(".mcpsum-audit");
+        for name in ESCAPING_NAMES {
+            assert!(default_audit_path(&lock, name).is_err(), "{name:?} was accepted");
+        }
+        for name in SAFE_NAMES {
+            let p = default_audit_path(&lock, name).unwrap();
+            assert!(
+                p.starts_with(&base)
+                    && p.components()
+                        .skip(2)
+                        .all(|c| matches!(c, std::path::Component::Normal(_)))
+                    && p.file_name().is_some_and(|f| f.to_string_lossy().ends_with(".jsonl")),
+                "server name {name:?} puts the audit log at {}",
+                p.display()
+            );
+        }
+    }
+
+    #[test]
+    fn scoped_server_names_log_to_a_subdirectory() {
+        let dir = std::env::temp_dir().join(format!("mcpsum-audit-scoped-{}-{}", std::process::id(), unix_ms()));
+        let path = default_audit_path(&dir.join("mcp.lock"), "@scope/x").unwrap();
+        let r = open_audit(&path, "@scope/x").and_then(|mut a| a.append(&ev(), 1));
+        let ok = path.ends_with(Path::new(".mcpsum-audit").join("@scope").join("x.jsonl")) && path.is_file();
+        let _ = std::fs::remove_dir_all(&dir);
+        r.unwrap();
+        assert!(ok, "{}", path.display());
     }
 
     #[test]
