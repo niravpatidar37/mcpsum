@@ -95,8 +95,11 @@ Property: invariant I1 in `tests/properties.rs`, also with a 2026-07-28 server.
 arguments that validate against the **locked** `inputSchema` as written *and*
 under strict rules. Any property the schema does not declare is rejected, unless
 the schema explicitly sets `additionalProperties`. Nested object schemas inside
-`allOf`/`anyOf`/`oneOf` are not made strict (only the locked schema applies
-there). `prompts/get` is checked against the
+`allOf`/`anyOf`/`oneOf`, `if`/`then`/`else`, `not` and `dependentSchemas` are
+not made strict (only the locked schema applies there): they describe the same
+object as their parent. `$defs`/`definitions` entries are made strict, which
+fails closed: a call can be denied when an entry used from `allOf` sits next to
+other declared properties. `prompts/get` is checked against the
 locked prompt's argument names. `resources/read` is limited to locked URIs and
 locked URI templates. Schemas with remote `$ref`s fail closed.
 
@@ -114,6 +117,8 @@ with `~/.ssh/id_rsa`). The call is refused before it reaches the server.
 `i2_undeclared_property_is_denied_in_nullable_and_map_value_objects`,
 `i2_locked_schema_is_enforced_where_strict_mode_would_widen_it`,
 `i2_strictify_leaves_not_and_if_untouched`,
+`i2_same_instance_applicators_accept_declared_and_deny_undeclared`,
+`i2_defs_used_from_allof_stay_strict_and_fail_closed`,
 `i2_prompt_get_checks_name_and_argument_names`,
 `i2_resource_read_limited_to_locked_uris_and_templates`,
 `i2_valid_call_is_forwarded_with_rewritten_id_and_response_mapped_back`.

@@ -34,6 +34,14 @@ All notable changes are recorded here. The format follows
 - A fresh `lock` of a server that speaks both eras now records it as 2026-07-28.
   Existing entries keep their era.
 
+### Fixed
+- I2: valid tool calls are no longer denied when the locked `inputSchema` uses
+  `dependentSchemas` or `if`/`then`/`else`. Strict mode added
+  `additionalProperties: false` inside those subschemas, which describe the same object
+  as their parent, so they rejected properties the parent declares. Undeclared
+  properties are still rejected at the parent. `$defs` entries used from `allOf` stay
+  strict (fail closed); see `strictify`.
+
 ## [0.2.0] - 2026-10-13
 
 ### Added
