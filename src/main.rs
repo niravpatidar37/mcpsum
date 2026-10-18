@@ -133,8 +133,26 @@ enum TaintCmd {
     },
 }
 
+/// Exit code for a `Cli::try_parse` error. clap would exit 2 on a usage
+/// error, which here means "findings", so map it to `EXIT_ERROR`; a help or
+/// version request (printed to stdout) stays a success.
+fn parse_error_code(e: &clap::Error) -> u8 {
+    if e.use_stderr() {
+        EXIT_ERROR
+    } else {
+        EXIT_OK
+    }
+}
+
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(e) => {
+            // Same output as `Cli::parse` (help/version on stdout, errors on stderr).
+            let _ = e.print();
+            return ExitCode::from(parse_error_code(&e));
+        }
+    };
     let result = match cli.cmd {
         Cmd::Lock {
             lock,
@@ -339,6 +357,9 @@ fn cmd_verify(lock: &Path, name: Option<&str>, timeout_secs: u64, strict: bool) 
 
 fn cmd_show(lock: &Path, name: Option<&str>) -> Result<u8> {
     let lf = LockFile::load(lock)?;
+    if let Some(n) = name {
+        lf.server(n)?; // a typo must fail, as it does for verify and proxy
+    }
     for (n, entry) in &lf.servers {
         if name.is_some_and(|x| x != n) {
             continue;
@@ -515,5 +536,54 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         assert_eq!(garbage, Ok(EXIT_DRIFT));
         assert_eq!(swapped, Ok(EXIT_DRIFT));
+    }
+
+    #[test]
+    fn show_unknown_name_is_an_error() {
+        // verify / suggest-policy / proxy --name fail on a name that is not
+        // locked; show --name must not print nothing and exit 0 on a typo.
+        let d = std::env::temp_dir().join(format!("mcpsum-main-show-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let lock = d.join("mcp.lock");
+        std::fs::write(&lock, LockFile::new().to_pretty().unwrap()).unwrap();
+        let r = cmd_show(&lock, Some("nope"));
+        let _ = std::fs::remove_dir_all(&d);
+        let e = r.expect_err("show --name nope must fail");
+        assert!(e.to_string().contains("`nope` is not in the lockfile"), "{e:#}");
+    }
+
+    fn parse_code(argv: &[&str]) -> u8 {
+        let e = Cli::try_parse_from(argv)
+            .err()
+            .expect("clap returns an error or a help/version request");
+        parse_error_code(&e)
+    }
+
+    #[test]
+    fn usage_errors_exit_3_not_the_findings_code() {
+        // README "Exit code" table: 2 = findings with `lock --deny-findings`,
+        // 3 = usage, I/O or protocol error. clap alone would exit 2.
+        for argv in [
+            &["mcpsum"][..],
+            &["mcpsum", "nope"],
+            &["mcpsum", "verify", "--bogus"],
+            &["mcpsum", "lock", "--name", "x", "--deny-findings"],
+            &["mcpsum", "verify", "--timeout-secs", "soon"],
+        ] {
+            assert_eq!(parse_code(argv), EXIT_ERROR, "{argv:?}");
+        }
+    }
+
+    #[test]
+    fn help_and_version_exit_0() {
+        for argv in [
+            &["mcpsum", "--help"][..],
+            &["mcpsum", "-V"],
+            &["mcpsum", "--version"],
+            &["mcpsum", "help", "lock"],
+            &["mcpsum", "verify", "-h"],
+        ] {
+            assert_eq!(parse_code(argv), EXIT_OK, "{argv:?}");
+        }
     }
 }

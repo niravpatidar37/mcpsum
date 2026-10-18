@@ -28,8 +28,9 @@ All notable changes are recorded here. The format follows
   detects a server's era the way the spec asks a dual-era client to on stdio:
   `server/discover` first, `initialize` after any other error or no answer, never after a
   2026-07-28 error (`-32021`, `-32022`). A 2026-07-28 entry records `supportedVersions`
-  and needs `lockfileVersion: 2`; files without one stay at version 1, so older mcpsum
-  still reads them, and versions other than 1 and 2 are refused. `verify` and a re-lock
+  and needs `lockfileVersion: 2`; files without one are written as version 1 (also once
+  the last such entry is gone), so older mcpsum still reads them, and versions other
+  than 1 and 2 are refused. `verify` and a re-lock
   ask an existing entry in its own era first; a change of era is definitional drift.
 - The proxy in front of servers that speak only MCP 2026-07-28 (#21). It never sends
   them `initialize`: it answers a legacy client's `initialize` from the lock, opens the
@@ -41,6 +42,37 @@ All notable changes are recorded here. The format follows
 ### Changed
 - A fresh `lock` of a server that speaks both eras now records it as 2026-07-28.
   Existing entries keep their era.
+
+### Fixed
+- I2: valid tool calls are no longer denied when the locked `inputSchema` uses
+  `dependentSchemas` or `if`/`then`/`else`. Strict mode added
+  `additionalProperties: false` inside those subschemas, which describe the same object
+  as their parent, so they rejected properties the parent declares. Undeclared
+  properties are still rejected at the parent. `$defs` entries used from `allOf` stay
+  strict (fail closed); see `strictify`.
+- I8: client messages the proxy rejects before any routing (a `jsonrpc` other than
+  `"2.0"`, an invalid id, neither `method` nor `id`, `initialize` without
+  `protocolVersion`, a second `initialize`) are now audited. They got an error but no
+  audit event. The reasons are fixed strings; no client value is logged.
+- `lock` and `verify` keep to `--timeout-secs` when a server floods requests. A server
+  that sent pings and never read its stdin filled the pipe with mcpsum's replies and
+  hung the probe forever; one that kept sending messages could hold it past the
+  timeout. Replies are now written on their own thread (the probe fails once 256 are
+  pending), and messages that arrive after the deadline are no longer read.
+- Safe rendering now shows the shorthand format controls U+1BCA0..U+1BCA3 as
+  `<U+XXXX>`. They are invisible and passed through `show`, `lock`/`verify` output and
+  findings unseen. The reserved default-ignorable ranges U+FFF0..U+FFF8,
+  U+E0080..U+E00FF and U+E01F0..U+E0FFF are shown too, so every Unicode 18.0
+  Default_Ignorable_Code_Point is covered, and a test checks the full list.
+- The per-line size limit (4 MiB) no longer counts the CR of a CRLF line ending, so a
+  message of exactly the limit is accepted with CRLF as it is with LF. Memory stays
+  bounded to one line, now checked by a test that counts allocations.
+- `show --name <name>` now fails (exit 3, "server `<name>` is not in the lockfile") when
+  the name is not locked, like `verify`, `suggest-policy` and `proxy`. Before, a typo
+  printed nothing and exited 0, which looked like an empty review.
+- Command-line usage errors (unknown flag, missing argument, no subcommand) now exit 3
+  as documented, not clap's 2, which mcpsum uses for `lock --deny-findings` findings.
+  Help and version output still exit 0, and messages are unchanged.
 
 ## [0.2.0] - 2026-10-13
 
