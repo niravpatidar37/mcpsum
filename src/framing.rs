@@ -1,5 +1,6 @@
 //! Newline-delimited framing with a hard per-line size limit. A peer that
-//! never sends a newline cannot make us buffer unbounded memory.
+//! never sends a newline cannot make us buffer unbounded memory. The limit
+//! applies to a line's content, without its LF or CRLF terminator.
 
 use std::io::{BufRead, ErrorKind};
 
@@ -39,7 +40,7 @@ impl<R: BufRead> Iterator for BoundedLines<R> {
             if available.is_empty() {
                 // EOF: flush a trailing partial line.
                 self.done = true;
-                if too_long {
+                if too_long || buf.len() > self.max {
                     return Some(Ok(Frame::TooLong));
                 }
                 let line = trim(&buf);
@@ -53,7 +54,9 @@ impl<R: BufRead> Iterator for BoundedLines<R> {
                 None => (available, None),
             };
             if !too_long {
-                if buf.len() + chunk.len() > self.max {
+                // One byte of slack for the CR of a CRLF terminator; the
+                // content is checked against `max` when the line ends.
+                if buf.len() + chunk.len() > self.max.saturating_add(1) {
                     too_long = true;
                     buf = Vec::new(); // release memory immediately
                 } else {
@@ -63,7 +66,8 @@ impl<R: BufRead> Iterator for BoundedLines<R> {
             let consumed = found_newline.map_or(available.len(), |i| i + 1);
             self.r.consume(consumed);
             if found_newline.is_some() {
-                if too_long {
+                let content = buf.strip_suffix(b"\r").unwrap_or(&buf);
+                if too_long || content.len() > self.max {
                     return Some(Ok(Frame::TooLong));
                 }
                 let line = trim(&buf);
@@ -124,6 +128,29 @@ mod tests {
     #[test]
     fn oversize_without_newline_ends_as_too_long() {
         assert_eq!(frames(&[b'y'; 100], 10), vec![Frame::TooLong]);
+    }
+
+    #[test]
+    fn crlf_terminator_does_not_count_toward_the_limit() {
+        // The CR of a CRLF terminator is framing, not content (see
+        // `splits_lines_and_strips_crlf`): exactly `max` content bytes pass
+        // with either line ending, one more byte is too long with either.
+        assert_eq!(frames(b"abc\n", 3), vec![Frame::Line(b"abc".to_vec())]);
+        assert_eq!(frames(b"abc\r\n", 3), vec![Frame::Line(b"abc".to_vec())]);
+        assert_eq!(
+            frames(b"abcd\nok\n", 3),
+            vec![Frame::TooLong, Frame::Line(b"ok".to_vec())]
+        );
+        assert_eq!(
+            frames(b"abcd\r\nok\n", 3),
+            vec![Frame::TooLong, Frame::Line(b"ok".to_vec())]
+        );
+        // Without a line ending (EOF), every byte is content.
+        assert_eq!(frames(b"abcd", 3), vec![Frame::TooLong]);
+        // Same across reader chunk boundaries.
+        let r = std::io::BufReader::with_capacity(1, Cursor::new(b"abc\r\nabcd\r\n".to_vec()));
+        let got: Vec<Frame> = BoundedLines::new(r, 3).map(Result::unwrap).collect();
+        assert_eq!(got, vec![Frame::Line(b"abc".to_vec()), Frame::TooLong]);
     }
 
     #[test]

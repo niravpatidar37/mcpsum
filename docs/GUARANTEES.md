@@ -95,8 +95,11 @@ Property: invariant I1 in `tests/properties.rs`, also with a 2026-07-28 server.
 arguments that validate against the **locked** `inputSchema` as written *and*
 under strict rules. Any property the schema does not declare is rejected, unless
 the schema explicitly sets `additionalProperties`. Nested object schemas inside
-`allOf`/`anyOf`/`oneOf` are not made strict (only the locked schema applies
-there). `prompts/get` is checked against the
+`allOf`/`anyOf`/`oneOf`, `if`/`then`/`else`, `not` and `dependentSchemas` are
+not made strict (only the locked schema applies there): they describe the same
+object as their parent. `$defs`/`definitions` entries are made strict, which
+fails closed: a call can be denied when an entry used from `allOf` sits next to
+other declared properties. `prompts/get` is checked against the
 locked prompt's argument names. `resources/read` is limited to locked URIs and
 locked URI templates. Schemas with remote `$ref`s fail closed.
 
@@ -114,6 +117,8 @@ with `~/.ssh/id_rsa`). The call is refused before it reaches the server.
 `i2_undeclared_property_is_denied_in_nullable_and_map_value_objects`,
 `i2_locked_schema_is_enforced_where_strict_mode_would_widen_it`,
 `i2_strictify_leaves_not_and_if_untouched`,
+`i2_same_instance_applicators_accept_declared_and_deny_undeclared`,
+`i2_defs_used_from_allof_stay_strict_and_fail_closed`,
 `i2_prompt_get_checks_name_and_argument_names`,
 `i2_resource_read_limited_to_locked_uris_and_templates`,
 `i2_valid_call_is_forwarded_with_rewritten_id_and_response_mapped_back`.
@@ -373,7 +378,7 @@ recorded before delivery).
 
 - malformed JSON
 - JSON-RPC batches
-- lines over 4 MiB
+- lines over 4 MiB (not counting the LF or CRLF line ending)
 - calls sent before `initialize` completes
 - duplicate in-flight client ids
 - responses that do not match an open request, or that answer one twice
@@ -391,7 +396,9 @@ quarantine it and exit, rather than hang.
 `i7_client_cancel_is_translated_to_proxy_id`,
 `i7_redos_patterns_in_locked_schemas_run_in_linear_time` (catastrophic regexes in locked
 schemas run in linear time or fail closed at compile time),
-`write_ahead_fails_closed_when_audit_cannot_be_written` (`src/proxy.rs`).
+`write_ahead_fails_closed_when_audit_cannot_be_written` (`src/proxy.rs`),
+`i7_framing_buffers_at_most_one_line` (`tests/framing_memory.rs`: a peer that never
+sends a newline cannot make mcpsum buffer more than one line).
 e2e: `test_I7_spoofed_and_duplicate_responses_are_dropped`,
 `test_I7_garbage_oversize_and_log_injection_are_dropped`,
 `test_I7_deaf_server_cannot_hang_proxy_shutdown`. Property: invariant I7.
@@ -411,6 +418,9 @@ head and checks its hash, then writes one complete line, so the log stays a sing
 chain. A head that fails its hash check is never extended; the proxy fails closed.
 Peer text in an entry is truncated (method 100, subject 200, reason 1000 characters),
 and the log refuses to write an entry over 1 MiB, the most it reads back as a head.
+When the proxy starts, a log that fails verification or that it could not extend
+(not valid UTF-8, no final newline, a blank or oversized last line) is moved aside
+unchanged as `<name>.corrupt-<ms>.jsonl` and a new chain starts.
 
 Argument **values** are never logged. Only their canonical digest
 (RFC 8785 JSON, SHA-256) is recorded.
@@ -422,6 +432,7 @@ hash somewhere they cannot write.
 **Tests.** `i8_allowed_calls_are_audited_with_args_digest_not_args`,
 `i8_denied_argument_values_never_appear_in_audit_or_error`,
 `i8_audit_entries_stay_bounded_whatever_the_peer_sends`, `audit::tests::*`,
+`i8_client_side_rejections_are_audited_without_client_values`, `audit::tests::*`,
 `concurrent_writers_keep_one_valid_chain` (8 writers × 50 appends).
 e2e: `test_I8_audit_log_verifies_and_detects_tampering`,
 `test_I8_two_proxies_for_one_server_keep_one_valid_chain`.
@@ -444,7 +455,8 @@ e2e: `test_I8_audit_log_verifies_and_detects_tampering`,
 - **Safe rendering.** Every server-authored string shown by `lock`, `verify`,
   `show`, or relayed from server stderr is escaped. Control characters,
   bidi overrides (Trojan Source, CVE-2021-42574), zero-width and Unicode
-  tag characters are shown as `<U+XXXX>`. Tests: `render::tests::*`,
+  tag characters, and every other Unicode default-ignorable code point
+  (invisible by definition) are shown as `<U+XXXX>`. Tests: `render::tests::*`,
   `test_server_stderr_cannot_inject_terminal_escapes`.
 
 ## Planned (not yet implemented)
