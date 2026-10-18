@@ -275,6 +275,9 @@ fn error_msg(id: Value, code: i64, message: impl Into<String>) -> Value {
     json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message.into()}})
 }
 
+/// Every audit event goes through here. Method, subject and reason can carry
+/// peer text (client lines up to `max_line_bytes`), so they are truncated:
+/// the log reads back entries of at most 1 MiB, and refuses to write more.
 fn audit(
     dir: Dir,
     method: Option<&str>,
@@ -284,10 +287,10 @@ fn audit(
 ) -> Action {
     Action::Audit(AuditEvent {
         dir,
-        method: method.map(str::to_string),
-        subject: subject.map(str::to_string),
+        method: method.map(|m| truncate(m, 100)),
+        subject: subject.map(|s| truncate(s, 200)),
         decision,
-        reason: reason.into(),
+        reason: truncate(&reason.into(), 1000),
         args_digest: None,
     })
 }
@@ -2996,6 +2999,41 @@ mod tests {
         let e = audits(&a).into_iter().find(|e| e.decision == Decision::Allow).unwrap();
         assert_eq!(e.subject.as_deref(), Some("add"));
         assert_eq!(e.args_digest, Some(digest(&json!({"a": 1, "b": 2}))));
+    }
+
+    #[test]
+    fn i8_audit_entries_stay_bounded_whatever_the_peer_sends() {
+        // Lines up to 4 MiB are accepted; the audit log reads back entries up
+        // to 1 MiB. Peer-chosen text must reach the log truncated.
+        let long = "x".repeat(2 * 1024 * 1024);
+        let mut events = Vec::new();
+        let mut m = mon();
+        events.extend(audits(&init_caps(&mut m, &surface(), json!({ long.clone(): {} }))));
+        let mut m = mon();
+        handshake(&mut m, &surface());
+        events.extend(audits(&call(&mut m, 1, &long, json!({}))));
+        events.extend(audits(&m.on_client_line(&b(
+            json!({"jsonrpc": "2.0", "id": 2, "method": "prompts/get", "params": {"name": long}}),
+        ))));
+        call(&mut m, 3, "add", json!({"a": 1, "b": 2}));
+        events.extend(audits(&m.on_client_line(&b(
+            json!({"jsonrpc": "2.0", "id": 3, "method": long, "params": {}}),
+        ))));
+        let mut m = mon();
+        events.extend(audits(&m.on_client_line(&b(
+            json!({"jsonrpc": "2.0", "id": 4, "method": long, "params": {"_meta": {META_VERSION: ""}}}),
+        ))));
+        assert!(events.len() >= 5, "{}", events.len());
+        for e in &events {
+            let n = |s: &Option<String>| s.as_deref().map_or(0, |s| s.chars().count());
+            assert!(n(&e.method) <= 100, "method of {} chars", n(&e.method));
+            assert!(n(&e.subject) <= 200, "subject of {} chars", n(&e.subject));
+            assert!(
+                e.reason.chars().count() <= 1000,
+                "reason of {} chars",
+                e.reason.chars().count()
+            );
+        }
     }
 
     // ---------------- I6: taint tracking (design 0001) ----------------

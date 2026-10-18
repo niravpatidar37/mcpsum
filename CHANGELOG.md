@@ -14,6 +14,13 @@ All notable changes are recorded here. The format follows
   nested objects typed `["object", "null"]` and in object schemas under
   `additionalProperties`/`unevaluatedProperties`. Affects 0.2.0 and earlier
   (GHSA-h84p-xpp4-jghw).
+- I8: one client request could block a server's audit log for good. A `tools/call` or
+  `prompts/get` for an unknown name (lines up to 4 MiB are accepted) was logged with
+  the name untruncated; every later append, and every proxy start for that server, then
+  refused the over-1 MiB head, so the proxy failed closed until the log was moved by
+  hand. Audit entries now truncate method (100 chars), subject (200) and reason (1000),
+  and the log refuses to write an entry it could not read back; a refused write still
+  stops the batch before anything is forwarded.
 
 ### Fixed
 - Audit log: the proxy no longer keeps a log it cannot extend. A log that is not valid

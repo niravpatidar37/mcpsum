@@ -439,6 +439,18 @@ mod tests {
     }
 
     #[test]
+    fn write_ahead_fails_closed_on_an_entry_too_large_to_log() {
+        let dir = std::env::temp_dir().join(format!("mcpsum-audit-big-{}-{}", std::process::id(), unix_ms()));
+        let mut audit = open_audit(&dir.join("s.jsonl"), "s").unwrap();
+        let mut big = ev();
+        big.reason = "x".repeat(2 * 1024 * 1024);
+        let batch = vec![Action::ToServer(serde_json::json!({"x": 1})), Action::Audit(big)];
+        let r = write_ahead(&mut audit, &batch, "s");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(r.is_err(), "an entry the log refuses must stop the batch");
+    }
+
+    #[test]
     fn write_ahead_logs_every_event_in_the_batch() {
         let mut buf = Vec::new();
         {
