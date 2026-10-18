@@ -418,7 +418,8 @@ can truncate the log, or rewrite all of it. To catch that, anchor the head
 hash somewhere they cannot write.
 
 **Tests.** `i8_allowed_calls_are_audited_with_args_digest_not_args`,
-`i8_denied_argument_values_never_appear_in_audit_or_error`, `audit::tests::*`,
+`i8_denied_argument_values_never_appear_in_audit_or_error`,
+`i8_client_side_rejections_are_audited_without_client_values`, `audit::tests::*`,
 `concurrent_writers_keep_one_valid_chain` (8 writers × 50 appends).
 e2e: `test_I8_audit_log_verifies_and_detects_tampering`,
 `test_I8_two_proxies_for_one_server_keep_one_valid_chain`.

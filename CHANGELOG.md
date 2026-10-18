@@ -34,6 +34,12 @@ All notable changes are recorded here. The format follows
 - A fresh `lock` of a server that speaks both eras now records it as 2026-07-28.
   Existing entries keep their era.
 
+### Fixed
+- I8: client messages the proxy rejects before any routing (a `jsonrpc` other than
+  `"2.0"`, an invalid id, neither `method` nor `id`, `initialize` without
+  `protocolVersion`, a second `initialize`) are now audited. They got an error but no
+  audit event. The reasons are fixed strings; no client value is logged.
+
 ## [0.2.0] - 2026-10-13
 
 ### Added
