@@ -282,6 +282,7 @@ Each network layer alone: `i5_seccomp_alone_blocks_tcp_and_udp`,
 `i5_decide_refuses_raw_ips_and_names_resolving_inward`, and the fuzz target
 `egress_head`. Grant rules:
 `i5_grant_is_deny_by_default_and_never_includes_home`,
+`i5_program_in_a_symlinked_home_does_not_expose_the_home_directory`,
 `i5_writes_that_would_cover_mcpsum_files_or_home_are_refused`.
 Mutation-checked: removing Landlock, seccomp, either network layer, the
 namespace rules or the protected-path check each fails a test. So does
