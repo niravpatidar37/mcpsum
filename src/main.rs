@@ -357,6 +357,9 @@ fn cmd_verify(lock: &Path, name: Option<&str>, timeout_secs: u64, strict: bool) 
 
 fn cmd_show(lock: &Path, name: Option<&str>) -> Result<u8> {
     let lf = LockFile::load(lock)?;
+    if let Some(n) = name {
+        lf.server(n)?; // a typo must fail, as it does for verify and proxy
+    }
     for (n, entry) in &lf.servers {
         if name.is_some_and(|x| x != n) {
             continue;
@@ -497,6 +500,20 @@ fn cmd_sandbox_exec(spec: &str, command: &[String]) -> Result<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn show_unknown_name_is_an_error() {
+        // verify / suggest-policy / proxy --name fail on a name that is not
+        // locked; show --name must not print nothing and exit 0 on a typo.
+        let d = std::env::temp_dir().join(format!("mcpsum-main-show-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let lock = d.join("mcp.lock");
+        std::fs::write(&lock, LockFile::new().to_pretty().unwrap()).unwrap();
+        let r = cmd_show(&lock, Some("nope"));
+        let _ = std::fs::remove_dir_all(&d);
+        let e = r.expect_err("show --name nope must fail");
+        assert!(e.to_string().contains("`nope` is not in the lockfile"), "{e:#}");
+    }
 
     fn parse_code(argv: &[&str]) -> u8 {
         let e = Cli::try_parse_from(argv)

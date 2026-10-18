@@ -35,6 +35,9 @@ All notable changes are recorded here. The format follows
   Existing entries keep their era.
 
 ### Fixed
+- `show --name <name>` now fails (exit 3, "server `<name>` is not in the lockfile") when
+  the name is not locked, like `verify`, `suggest-policy` and `proxy`. Before, a typo
+  printed nothing and exited 0, which looked like an empty review.
 - Command-line usage errors (unknown flag, missing argument, no subcommand) now exit 3
   as documented, not clap's 2, which mcpsum uses for `lock --deny-findings` findings.
   Help and version output still exit 0, and messages are unchanged.
