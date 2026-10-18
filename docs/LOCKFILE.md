@@ -48,7 +48,7 @@ use a lockfile whose digests do not match its contents.
 
 | Field | Meaning |
 |---|---|
-| `lockfileVersion` | Format version, `1` or `2`. mcpsum writes `1` unless an entry needs `2` (a [2026-07-28 server](#protocol-era)), so a lockfile without such a server stays readable by mcpsum 0.2.0 and older. Any other version, and a version-1 file with a `supportedVersions` entry, are rejected. |
+| `lockfileVersion` | Format version, `1` or `2`. mcpsum writes `1` unless an entry needs `2` (a [2026-07-28 server](#protocol-era)), so a lockfile without such a server stays readable by mcpsum 0.2.0 and older. This is decided on every write: a file goes back to `1` once its last such entry is removed or re-locked over `initialize`. Any other version, and a version-1 file with a `supportedVersions` entry, are rejected. |
 | `generator` | The mcpsum version that wrote the file. Informational. |
 | `servers.<name>` | One entry per server. `<name>` is what you pass to `--name` and use in your client config. |
 | `command` | The exact argv the proxy runs. **The proxy never takes a command from the client config**, so the config and the lock cannot silently diverge. Pin package versions here (`pkg==1.2.3`, `pkg@1.2.3`). |
@@ -58,6 +58,9 @@ use a lockfile whose digests do not match its contents.
 | `tools`, `prompts`, `resources`, `resourceTemplates` | The full definitions as returned by the server (all pages), keyed by `name`, `name`, `uri` and `uriTemplate`. Served to the client from here. Capped at 1,000 items per kind. |
 | `policy` | Optional, written by **you** (never by the server): taint labels ([I6](#policy-optional-i6)) and a sandbox ([I5](#sandbox-optional-i5)). Not covered by `digests`, and kept when the server is re-locked. |
 | `digests` | SHA-256 over the RFC 8785 canonical JSON of each item, plus one over the whole surface. mcpsum recomputes them on load and refuses a lockfile that does not match. |
+
+A server entry with any other key is refused, so a misspelled `policy` cannot
+silently turn taint tracking and the sandbox off.
 
 ## Policy (optional, I6)
 
@@ -95,7 +98,7 @@ Rules:
 
 - Every name must be a locked tool (or one of the two wildcards). A misspelled
   name is an error, so a typo cannot silently leave a tool unprotected. Unknown
-  keys are errors too.
+  keys are errors too, in `policy` and in the server entry itself.
 - Tool annotations (`readOnlyHint`, `destructiveHint`, `openWorldHint`) are
   hints written by the server. Use them to help you decide, but mcpsum never
   applies them on its own.
