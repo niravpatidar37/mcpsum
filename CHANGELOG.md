@@ -34,6 +34,11 @@ All notable changes are recorded here. The format follows
 - A fresh `lock` of a server that speaks both eras now records it as 2026-07-28.
   Existing entries keep their era.
 
+### Fixed
+- The per-line size limit (4 MiB) no longer counts the CR of a CRLF line ending, so a
+  message of exactly the limit is accepted with CRLF as it is with LF. Memory stays
+  bounded to one line, now checked by a test that counts allocations.
+
 ## [0.2.0] - 2026-10-13
 
 ### Added
