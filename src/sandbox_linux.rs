@@ -13,7 +13,9 @@
 //!    without `socket(2)`), and none of the syscalls that would let the server
 //!    build more privilege: namespaces, mounts, `bpf`, keyrings, `ptrace`,
 //!    `perf_event_open`. `clone3` gets `ENOSYS` so libc falls back to `clone`,
-//!    whose namespace flags *can* be filtered (as Docker and Flatpak do).
+//!    whose namespace flags *can* be filtered (as Docker and Flatpak do). On
+//!    x86_64, every x32 system call gets `ENOSYS`, so none of this can be
+//!    bypassed through x32 syscall numbers.
 //! 3. **Allowlist mode** (`network.allow` not empty): first, a new user and
 //!    network namespace with only `lo`. The helper binds the egress proxy's
 //!    port there and hands the listening socket to mcpsum, which runs the
@@ -177,7 +179,8 @@ fn denied_syscalls(no_network: bool) -> Result<BTreeMap<i64, Vec<SeccompRule>>> 
     Ok(m)
 }
 
-fn apply_seccomp(no_network: bool) -> Result<()> {
+/// The seccomp programs the helper installs, in order.
+fn seccomp_programs(no_network: bool) -> Result<Vec<BpfProgram>> {
     let arch = arch()?;
     let deny: BpfProgram = SeccompFilter::new(
         denied_syscalls(no_network)?,
@@ -195,8 +198,47 @@ fn apply_seccomp(no_network: bool) -> Result<()> {
         arch,
     )?
     .try_into()?;
-    seccompiler::apply_filter(&deny).context("installing the seccomp filter")?;
-    seccompiler::apply_filter(&enosys).context("installing the seccomp filter")?;
+    #[cfg_attr(not(target_arch = "x86_64"), allow(unused_mut))]
+    let mut programs = vec![deny, enosys];
+    #[cfg(target_arch = "x86_64")]
+    programs.push(x32_filter());
+    Ok(programs)
+}
+
+/// `__X32_SYSCALL_BIT` (arch/x86/include/uapi/asm/unistd.h).
+#[cfg(target_arch = "x86_64")]
+const X32_SYSCALL_BIT: u32 = 0x4000_0000;
+
+/// Refuses every x32 system call with `ENOSYS`, as a kernel without the x32
+/// ABI does. x32 calls carry x86_64's audit arch and set bit 30 of the
+/// number, so the filters above, which match exact x86_64 numbers, would let
+/// x32 `socket`, `unshare`, `clone` or `ptrace` through on kernels built with
+/// `CONFIG_X86_X32_ABI`. seccompiler cannot express a range, so this is
+/// written out: check the arch, then `nr >= __X32_SYSCALL_BIT`.
+#[cfg(target_arch = "x86_64")]
+fn x32_filter() -> BpfProgram {
+    use seccompiler::sock_filter;
+    const LD_W_ABS: u16 = 0x20; // BPF_LD | BPF_W | BPF_ABS
+    const JEQ_K: u16 = 0x15; // BPF_JMP | BPF_JEQ | BPF_K
+    const JGE_K: u16 = 0x35; // BPF_JMP | BPF_JGE | BPF_K
+    const RET_K: u16 = 0x06; // BPF_RET | BPF_K
+    const AUDIT_ARCH_X86_64: u32 = 62 | 0x8000_0000 | 0x4000_0000;
+    let op = |code, jt, jf, k| sock_filter { code, jt, jf, k };
+    vec![
+        op(LD_W_ABS, 0, 0, 4), // seccomp_data.arch
+        op(JEQ_K, 1, 0, AUDIT_ARCH_X86_64),
+        op(RET_K, 0, 0, libc::SECCOMP_RET_KILL_PROCESS),
+        op(LD_W_ABS, 0, 0, 0), // seccomp_data.nr
+        op(JGE_K, 0, 1, X32_SYSCALL_BIT),
+        op(RET_K, 0, 0, libc::SECCOMP_RET_ERRNO | libc::ENOSYS as u32),
+        op(RET_K, 0, 0, libc::SECCOMP_RET_ALLOW),
+    ]
+}
+
+fn apply_seccomp(no_network: bool) -> Result<()> {
+    for p in seccomp_programs(no_network)? {
+        seccompiler::apply_filter(&p).context("installing the seccomp filter")?;
+    }
     Ok(())
 }
 
@@ -433,6 +475,15 @@ mod tests {
                     socket_errno(inet, libc::SOCK_STREAM, libc::IPPROTO_SCTP),
                 );
             }
+            #[cfg(target_arch = "x86_64")]
+            "seccomp-x32" => {
+                apply_seccomp(true).unwrap();
+                return format!(
+                    "socket={} getpid={}",
+                    x32_errno(libc::SYS_socket, [libc::AF_INET as i64, libc::SOCK_DGRAM as i64, 0]),
+                    x32_errno(libc::SYS_getpid, [0; 3]),
+                );
+            }
             "netns" => return in_forked_child(|| netns_body(port)),
             _ => unreachable!(),
         }
@@ -520,6 +571,127 @@ mod tests {
         }
         let r = run_child("sandbox_linux::tests::i5_seccomp_alone_blocks_tcp_and_udp", "seccomp");
         assert_eq!(r, "tcp=Err(PermissionDenied) udp=Err(PermissionDenied)", "{r}");
+    }
+
+    /// errno of the x32 form of syscall `nr`, or "ok" (an fd it returns is
+    /// closed).
+    #[cfg(target_arch = "x86_64")]
+    fn x32_errno(nr: i64, a: [i64; 3]) -> String {
+        // SAFETY: test-only; socket and getpid take no pointers.
+        let r = unsafe { libc::syscall(nr | X32_SYSCALL_BIT as i64, a[0], a[1], a[2]) };
+        if r < 0 {
+            return format!("errno{}", io::Error::last_os_error().raw_os_error().unwrap_or(0));
+        }
+        if nr == libc::SYS_socket {
+            // SAFETY: a descriptor socket(2) just returned to us.
+            drop(unsafe { OwnedFd::from_raw_fd(r as RawFd) });
+        }
+        "ok".into()
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    /// The installed programs as the kernel runs them: each one on `struct
+    /// seccomp_data`, the most restrictive action wins (signed compare,
+    /// newest filter first on ties).
+    fn seccomp_verdict(progs: &[BpfProgram], nr: i64, args: [u64; 6]) -> u32 {
+        let mut data = Vec::with_capacity(64);
+        data.extend_from_slice(&(nr as u32).to_le_bytes());
+        data.extend_from_slice(&AUDIT_ARCH.to_le_bytes());
+        data.extend_from_slice(&0u64.to_le_bytes());
+        for a in args {
+            data.extend_from_slice(&a.to_le_bytes());
+        }
+        let mut verdict = libc::SECCOMP_RET_ALLOW;
+        for prog in progs.iter().rev() {
+            let r = run_bpf(prog, &data);
+            let action = |v: u32| (v & libc::SECCOMP_RET_ACTION_FULL) as i32;
+            if action(r) < action(verdict) {
+                verdict = r;
+            }
+        }
+        verdict
+    }
+
+    /// A classic-BPF interpreter for the opcodes seccomp filters use here.
+    #[cfg(target_arch = "x86_64")]
+    fn run_bpf(prog: &[seccompiler::sock_filter], data: &[u8]) -> u32 {
+        let (mut acc, mut pc) = (0u32, 0usize);
+        loop {
+            let i = &prog[pc];
+            pc += 1;
+            let k = i.k as usize;
+            match i.code {
+                0x20 => acc = u32::from_le_bytes(data[k..k + 4].try_into().unwrap()), // ld [k]
+                0x54 => acc &= i.k,                                                   // and #k
+                0x05 => pc += k,                                                      // ja
+                0x15 | 0x25 | 0x35 => {
+                    let t = match i.code {
+                        0x15 => acc == i.k,
+                        0x25 => acc > i.k,
+                        _ => acc >= i.k,
+                    };
+                    pc += usize::from(if t { i.jt } else { i.jf });
+                }
+                0x06 => return i.k, // ret #k
+                c => panic!("BPF opcode {c:#x} not modelled"),
+            }
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    const AUDIT_ARCH: u32 = 62 | 0x8000_0000 | 0x4000_0000; // AUDIT_ARCH_X86_64
+
+    /// x32 system calls carry x86_64's audit arch with bit 30 set in the
+    /// number, so a filter matching exact numbers never sees them. Checked on
+    /// the compiled programs, so it holds whether or not this kernel has x32.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn i5_seccomp_refuses_x32_syscalls() {
+        let enosys = libc::SECCOMP_RET_ERRNO | libc::ENOSYS as u32;
+        let eperm = libc::SECCOMP_RET_ERRNO | libc::EPERM as u32;
+        let udp = [libc::AF_INET as u64, libc::SOCK_DGRAM as u64, 0, 0, 0, 0];
+        for no_network in [true, false] {
+            let progs = seccomp_programs(no_network).unwrap();
+            // Native calls keep their verdicts.
+            assert_eq!(seccomp_verdict(&progs, libc::SYS_socket, udp), eperm);
+            assert_eq!(seccomp_verdict(&progs, libc::SYS_clone3, [0; 6]), enosys);
+            assert_eq!(
+                seccomp_verdict(&progs, libc::SYS_getpid, [0; 6]),
+                libc::SECCOMP_RET_ALLOW
+            );
+            // Every x32 call is refused: each denied one, x32-only numbers
+            // (520 is x32 execve) and harmless ones alike.
+            let denied = denied_syscalls(no_network).unwrap().into_keys();
+            for nr in denied.chain([libc::SYS_clone3, libc::SYS_getpid, 520]) {
+                let x32 = nr | X32_SYSCALL_BIT as i64;
+                for args in [udp, [libc::CLONE_NEWUSER as u64, 0, 0, 0, 0, 0]] {
+                    assert_eq!(
+                        seccomp_verdict(&progs, x32, args),
+                        enosys,
+                        "x32 syscall {nr} (no_network={no_network}) is not refused"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The same on the running kernel, where it has the x32 ABI enabled
+    /// (`CONFIG_X86_X32_ABI`, e.g. the WSL2 kernel).
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn i5_seccomp_alone_refuses_x32_syscalls_where_the_kernel_has_them() {
+        if maybe_child() {
+            return;
+        }
+        if x32_errno(libc::SYS_getpid, [0; 3]) != "ok" {
+            eprintln!("skipped: this kernel has no x32 ABI");
+            return;
+        }
+        let r = run_child(
+            "sandbox_linux::tests::i5_seccomp_alone_refuses_x32_syscalls_where_the_kernel_has_them",
+            "seccomp-x32",
+        );
+        assert_eq!(r, format!("socket=errno{0} getpid=errno{0}", libc::ENOSYS), "{r}");
     }
 
     #[test]
