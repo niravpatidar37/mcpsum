@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 
@@ -432,6 +433,35 @@ def test_lock_time_findings_flag_hidden_characters_and_injection_markers(tmp_pat
     assert "<U+200B>" in out and "<important>" in out.lower() and "id_rsa" in out
     assert "\u200b" not in out
     lock_evil(tmp_path, "rugpull", poison_file=poison, extra=("--deny-findings",), expect_rc=2)
+
+
+# ------------------------------------------------- exit codes
+
+@pytest.mark.parametrize("argv,diagnostic", [
+    ((), "Commands:"),
+    (("nope",), "unrecognized subcommand 'nope'"),
+    (("verify", "--bogus"), "unexpected argument '--bogus'"),
+    (("lock", "--name", "x", "--deny-findings"), "required arguments were not provided"),
+])
+def test_usage_errors_exit_3_not_the_findings_code(argv, diagnostic):
+    # Exit 2 means "findings with lock --deny-findings"; CI must not read a typo as that.
+    r = run(*argv)
+    assert r.returncode == 3, r
+    assert r.stdout == "" and diagnostic in r.stderr and "Usage: mcpsum" in r.stderr, r
+
+
+@pytest.mark.parametrize("argv,expected", [
+    (("--help",), ("Usage: mcpsum", "Commands:", "verify")),
+    (("--version",), ()),
+    (("help", "lock"), ("Usage: mcpsum", "lock [OPTIONS] --name <NAME>")),
+])
+def test_help_and_version_exit_0_on_stdout(argv, expected):
+    r = run(*argv)
+    assert r.returncode == 0 and r.stderr == "", r
+    if argv == ("--version",):
+        assert re.fullmatch(r"mcpsum \d+\.\d+\.\d+\s*", r.stdout), r
+    for text in expected:
+        assert text in r.stdout, (text, r)
 
 
 # ------------------------------------------------- verify semantics

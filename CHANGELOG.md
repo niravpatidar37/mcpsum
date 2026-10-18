@@ -34,6 +34,11 @@ All notable changes are recorded here. The format follows
 - A fresh `lock` of a server that speaks both eras now records it as 2026-07-28.
   Existing entries keep their era.
 
+### Fixed
+- Command-line usage errors (unknown flag, missing argument, no subcommand) now exit 3
+  as documented, not clap's 2, which mcpsum uses for `lock --deny-findings` findings.
+  Help and version output still exit 0, and messages are unchanged.
+
 ## [0.2.0] - 2026-10-13
 
 ### Added
