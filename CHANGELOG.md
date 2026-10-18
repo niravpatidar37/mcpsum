@@ -51,6 +51,13 @@ All notable changes are recorded here. The format follows
   Existing entries keep their era.
 
 ### Fixed
+- Client cancellation (`notifications/cancelled`) now follows the MCP spec: a cancelled
+  call frees its pending slot, request id and progress token at once, and a late
+  response from the server is dropped (audited) instead of reaching the client. Before,
+  every cancelled call kept its slot until the server answered, so after `max_pending`
+  (256) unanswered cancels each new call was refused with `-32001`, and a cancelled id
+  could not be reused. A call cancelled while still queued for drift verification is now
+  dropped (audited) and never sent; before, it still ran on the server after verification.
 - The proxy no longer waits forever when a server does not answer the `initialize` or
   `server/discover` that mcpsum sends itself (for a 2026-07-28 client, or in front of a
   2026-07-28 server). Only verification had a timeout, so such a session stayed in its

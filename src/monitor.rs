@@ -189,6 +189,9 @@ pub struct Monitor {
     phase: Phase,
     next_id: u64,
     pending: HashMap<u64, Pending>,
+    /// Upstream ids of calls the client cancelled (bounded by `max_pending`):
+    /// a late response to one is dropped, never delivered.
+    cancelled: VecDeque<u64>,
     client_ids: HashSet<String>,
     /// Live progress tokens, with the source label of their request (I6).
     progress_tokens: HashMap<String, Option<String>>,
@@ -451,6 +454,7 @@ impl Monitor {
             phase: Phase::New,
             next_id: 1,
             pending: HashMap::new(),
+            cancelled: VecDeque::new(),
             client_ids: HashSet::new(),
             progress_tokens: HashMap::new(),
             queue: VecDeque::new(),
@@ -1373,14 +1377,56 @@ impl Monitor {
                     }
                     return;
                 }
+                // Queued while the server is opened or verified: never sent, so
+                // drop it here; it must not run after verification.
+                if let Some(pos) = self.queue.iter().position(|(q, _, _)| *q == target) {
+                    let (_, queued, _) = self.queue.remove(pos).expect("position is in range");
+                    out.push(audit(
+                        Dir::ClientToServer,
+                        Some(&method),
+                        Some(&queued),
+                        Decision::Drop,
+                        "queued call cancelled by the client; never forwarded",
+                    ));
+                    return;
+                }
+                // Only the client's own forwarded calls: mcpsum's internal
+                // requests (initialize, discover, lists) are never cancellable.
                 let nid = self.pending.iter().find_map(|(nid, p)| match p {
                     Pending::Client { client_id, .. } if *client_id == target => Some(*nid),
                     _ => None,
                 });
                 match nid {
-                    Some(nid) => out.push(Action::ToServer(
-                        json!({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": nid}}),
-                    )),
+                    Some(nid) => {
+                        // MCP cancellation: free the request's resources and send
+                        // no response. Its slot, id and progress token are released
+                        // now; a late response from the server is dropped.
+                        if let Some(Pending::Client {
+                            client_id,
+                            progress_token,
+                            ..
+                        }) = self.pending.remove(&nid)
+                        {
+                            self.client_ids.remove(&canonical_json(&client_id));
+                            if let Some(t) = progress_token {
+                                self.progress_tokens.remove(&t);
+                            }
+                        }
+                        if self.cancelled.len() >= self.policy.max_pending {
+                            self.cancelled.pop_front();
+                        }
+                        self.cancelled.push_back(nid);
+                        out.push(Action::ToServer(
+                            json!({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": nid}}),
+                        ));
+                        out.push(audit(
+                            Dir::ClientToServer,
+                            Some(&method),
+                            None,
+                            Decision::Allow,
+                            "in-flight call cancelled by the client; cancel forwarded, a late response will be dropped",
+                        ));
+                    }
                     None => out.push(audit(
                         Dir::ClientToServer,
                         Some(&method),
@@ -1547,13 +1593,13 @@ impl Monitor {
 
     fn server_response(&mut self, id: Value, obj: &Map<String, Value>, out: &mut Vec<Action>) {
         let Some(pending) = id.as_u64().and_then(|n| self.pending.remove(&n)) else {
-            out.push(audit(
-                Dir::ServerToClient,
-                None,
-                None,
-                Decision::Drop,
-                "response matches no pending request (spoofed or duplicate)",
-            ));
+            let cancelled = id.as_u64().and_then(|n| self.cancelled.iter().position(|c| *c == n));
+            let reason = match cancelled.and_then(|i| self.cancelled.remove(i)) {
+                // Never delivered, so it cannot taint the session either (I6).
+                Some(_) => "response to a request the client cancelled",
+                None => "response matches no pending request (spoofed or duplicate)",
+            };
+            out.push(audit(Dir::ServerToClient, None, None, Decision::Drop, reason));
             return;
         };
         match pending {
@@ -3065,6 +3111,138 @@ mod tests {
         assert!(to_server(&a).is_empty());
     }
 
+    fn cancel(m: &mut Monitor, id: Value) -> Vec<Action> {
+        m.on_client_line(&b(
+            json!({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": id}}),
+        ))
+    }
+
+    fn calls_to_server(a: &[Action]) -> Vec<Value> {
+        to_server(a)
+            .into_iter()
+            .filter(|v| v["method"] == json!("tools/call"))
+            .collect()
+    }
+
+    #[test]
+    fn i7_cancelled_call_frees_its_slot_and_id_and_its_late_response_is_dropped() {
+        // MCP cancellation: the receiver frees the request's resources and
+        // sends no response; the sender ignores a response that arrives later.
+        let s = surface();
+        let mut m = Monitor::new(
+            lock(),
+            Policy {
+                max_pending: 2,
+                ..Policy::default()
+            },
+        );
+        handshake(&mut m, &s);
+        let (mut fwd, mut cancels) = (Vec::new(), Vec::new());
+        for id in [1, 2] {
+            let req = json!({"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": {"name": "add",
+                "arguments": {"a": 1, "b": 2}, "_meta": {"progressToken": format!("tok{id}")}}});
+            let up = calls_to_server(&m.on_client_line(&b(req)));
+            assert_eq!(up.len(), 1);
+            let a = cancel(&mut m, json!(id));
+            let up_cancel = to_server(&a);
+            assert_eq!(up_cancel.len(), 1);
+            assert_eq!(up_cancel[0]["params"]["requestId"], up[0]["id"]);
+            assert!(to_client(&a).is_empty(), "no response to a cancelled request");
+            cancels.extend(audits(&a));
+            fwd.push(up[0].clone());
+        }
+        let a = call(&mut m, 3, "add", json!({"a": 1, "b": 2}));
+        assert_eq!(calls_to_server(&a).len(), 1, "slot still held: {:?}", to_client(&a));
+        let a = call(&mut m, 1, "add", json!({"a": 1, "b": 2}));
+        assert_eq!(calls_to_server(&a).len(), 1, "id still in use: {:?}", to_client(&a));
+        // Late progress and a late result for a cancelled call never reach the client.
+        let p = m.on_server_line(&b(
+            json!({"jsonrpc": "2.0", "method": "notifications/progress", "params": {"progressToken": "tok2", "progress": 1}}),
+        ));
+        assert!(to_client(&p).is_empty(), "progress for a cancelled call: {p:?}");
+        let late = m.on_server_line(&b(
+            json!({"jsonrpc": "2.0", "id": fwd[1]["id"], "result": {"content": []}}),
+        ));
+        assert!(to_client(&late).is_empty(), "late response forwarded: {late:?}");
+        let e = audits(&late);
+        assert_eq!(e.len(), 1);
+        assert_eq!(
+            (e[0].decision, e[0].reason.as_str()),
+            (Decision::Drop, "response to a request the client cancelled")
+        );
+        // I8: each forwarded cancel is audited.
+        assert_eq!(cancels.len(), 2);
+        assert!(cancels
+            .iter()
+            .all(|e| e.method.as_deref() == Some("notifications/cancelled")));
+        // The record of cancelled ids is bounded by `max_pending`: the oldest
+        // is forgotten, and its late response is dropped as unmatched.
+        cancel(&mut m, json!(3));
+        cancel(&mut m, json!(1));
+        let late = m.on_server_line(&b(
+            json!({"jsonrpc": "2.0", "id": fwd[0]["id"], "result": {"content": []}}),
+        ));
+        assert!(to_client(&late).is_empty());
+        assert_eq!(
+            audits(&late)[0].reason,
+            "response matches no pending request (spoofed or duplicate)"
+        );
+    }
+
+    #[test]
+    fn i7_cancelled_queued_call_is_never_forwarded() {
+        let s = surface();
+        let mut m = mon();
+        init(&mut m, &s); // awaiting `initialized`: calls are queued
+        let q = call(&mut m, 5, "add", json!({"a": 1, "b": 2}));
+        assert!(to_client(&q).is_empty() && to_server(&q).is_empty(), "queued");
+        let a = cancel(&mut m, json!(5));
+        assert!(to_client(&a).is_empty() && to_server(&a).is_empty(), "{a:?}");
+        let e = audits(&a);
+        let a = m.on_client_line(&b(json!({"jsonrpc": "2.0", "method": "notifications/initialized"})));
+        let a = answer_lists(&mut m, a, &s);
+        assert!(!m.is_quarantined());
+        assert!(calls_to_server(&a).is_empty(), "cancelled call ran: {a:?}");
+        assert!(to_client(&a).is_empty(), "response to a cancelled call: {a:?}");
+        // I8: the dropped call is audited.
+        assert_eq!(e.len(), 1);
+        assert_eq!(
+            (e[0].decision, e[0].subject.as_deref()),
+            (Decision::Drop, Some("tools/call"))
+        );
+        // The id is free again.
+        assert_eq!(
+            calls_to_server(&call(&mut m, 5, "add", json!({"a": 1, "b": 2}))).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn i7_client_cannot_cancel_mcpsum_own_requests() {
+        // The client's `initialize` (which MCP forbids cancelling) and mcpsum's
+        // own verification requests are not the client's calls.
+        let s = surface();
+        let mut m = mon();
+        let a = m.on_client_line(&b(json!({"jsonrpc": "2.0", "id": 0, "method": "initialize",
+            "params": {"protocolVersion": "2025-06-18", "capabilities": {}}})));
+        let init_id = to_server(&a)[0]["id"].clone();
+        assert!(to_server(&cancel(&mut m, json!(0))).is_empty());
+        let res = json!({"protocolVersion": "2025-06-18", "capabilities": s.capabilities,
+            "serverInfo": s.server_info, "instructions": s.instructions});
+        let a = m.on_server_line(&b(json!({"jsonrpc": "2.0", "id": init_id, "result": res})));
+        assert_eq!(to_client(&a)[0]["id"], json!(0), "initialize still answered");
+        let a = m.on_client_line(&b(json!({"jsonrpc": "2.0", "method": "notifications/initialized"})));
+        let list_id = to_server(&a).iter().find(|v| v.get("id").is_some()).unwrap()["id"].clone();
+        let c = cancel(&mut m, list_id);
+        assert!(to_server(&c).is_empty(), "internal request cancelled: {c:?}");
+        answer_lists(&mut m, a, &s);
+        assert!(!m.is_quarantined(), "{:?}", m.quarantine_reason());
+        assert_eq!(
+            calls_to_server(&call(&mut m, 1, "add", json!({"a": 1, "b": 2}))).len(),
+            1
+        );
+    }
+
     #[test]
     fn i8_client_side_rejections_are_audited_without_client_values() {
         // Every rejection sent back to the client is also a decision for the
@@ -3589,6 +3767,21 @@ mod tests {
             tool_req(2, "add", json!({"a": 1, "b": 2})),
             json!({"result": {}}),
         );
+    }
+
+    #[test]
+    fn i6_late_response_to_a_cancelled_source_call_is_dropped_and_does_not_taint() {
+        // The response never reaches the client, so the session read nothing.
+        let mut m = taint_mon();
+        handshake(&mut m, &taint_surface());
+        let up = to_server(&m.on_client_line(&b(tool_req(1, "fetch", json!({"url": "https://x.example"})))));
+        assert_eq!(up.len(), 1);
+        cancel(&mut m, json!(1));
+        let late = m.on_server_line(&b(json!({"jsonrpc": "2.0", "id": up[0]["id"], "result": injection()})));
+        assert!(to_client(&late).is_empty(), "late response delivered: {late:?}");
+        assert!(!late.iter().any(|x| matches!(x, Action::Taint { .. })));
+        assert_eq!(m.taint_source(), None);
+        forward_and_reply(&mut m, tool_req(2, "send", send_args()), json!({"result": {}}));
     }
 
     #[test]
