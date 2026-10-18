@@ -209,7 +209,7 @@ Read this before you rely on mcpsum. Details: [GUARANTEES.md § Limits](docs/GUA
 
 ## How it is verified
 
-- **140+ unit tests** (146 on Windows, 152 on Linux, where the sandbox layers are tested too)
+- **140+ unit tests** (150 on Windows, 156 on Linux, where the sandbox layers are tested too)
   across the monitor, lockfile, audit log, framing, rendering, sandbox, egress proxy, process
   and proxy.
 - **Property tests**: 15,000 random adversarial sessions per run, checked after every

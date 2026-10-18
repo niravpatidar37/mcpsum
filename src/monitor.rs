@@ -184,7 +184,7 @@ struct Verify {
 pub struct Monitor {
     lock: ServerLock,
     policy: Policy,
-    validators: HashMap<String, Result<jsonschema::Validator, String>>,
+    validators: HashMap<String, Result<ArgsValidator, String>>,
     templates: Vec<regex::Regex>,
     phase: Phase,
     next_id: u64,
@@ -295,6 +295,10 @@ fn audit(
 /// Make object schemas reject undeclared properties unless the locked schema
 /// explicitly allows them. Combinator schemas are left untouched because
 /// `additionalProperties: false` inside allOf/anyOf/oneOf changes their meaning.
+/// `not` and `if` are left untouched too: a stricter subschema there matches
+/// less often, which would *widen* what the schema accepts. The strict form is
+/// only ever enforced together with the locked schema as written (see
+/// [`ArgsValidator`]), so a rewrite here can add rules but never remove one.
 pub fn strictify(schema: &Value) -> Value {
     let Value::Object(m) = schema else {
         return schema.clone();
@@ -308,10 +312,12 @@ pub fn strictify(schema: &Value) -> Value {
                 }
                 other => other.clone(),
             },
-            "items" | "additionalItems" | "contains" | "not" | "if" | "then" | "else" | "unevaluatedItems" => match v {
+            "items" | "additionalItems" | "contains" | "then" | "else" | "unevaluatedItems" => match v {
                 Value::Array(a) => Value::Array(a.iter().map(strictify).collect()),
                 other => strictify(other),
             },
+            // A schema for the values of undeclared keys (booleans pass through as is).
+            "additionalProperties" | "unevaluatedProperties" => strictify(v),
             "prefixItems" => match v {
                 Value::Array(a) => Value::Array(a.iter().map(strictify).collect()),
                 other => other.clone(),
@@ -320,7 +326,11 @@ pub fn strictify(schema: &Value) -> Value {
         };
         out.insert(k.clone(), nv);
     }
-    let is_object_schema = out.get("type") == Some(&json!("object")) || out.contains_key("properties");
+    let is_object_schema = match out.get("type") {
+        Some(Value::String(t)) => t == "object",
+        Some(Value::Array(ts)) => ts.iter().any(|t| t == "object"),
+        _ => false,
+    } || out.contains_key("properties");
     let open_ended = [
         "additionalProperties",
         "unevaluatedProperties",
@@ -338,12 +348,36 @@ pub fn strictify(schema: &Value) -> Value {
     Value::Object(out)
 }
 
-fn compile_validator(schema: &Value) -> Result<jsonschema::Validator, String> {
+fn build_validator(schema: &Value) -> Result<jsonschema::Validator, String> {
     jsonschema::options()
         // linear-time regex engine: locked schemas are still attacker-authored (ReDoS)
         .with_pattern_options(jsonschema::PatternOptions::regex())
-        .build(&strictify(schema))
+        .build(schema)
         .map_err(|e| e.to_string())
+}
+
+fn compile_validator(schema: &Value) -> Result<jsonschema::Validator, String> {
+    build_validator(&strictify(schema))
+}
+
+/// I2: arguments must satisfy the locked schema as written *and* its strict
+/// form. Checking both means `strictify` can only add rules, never drop one.
+pub(crate) struct ArgsValidator {
+    strict: jsonschema::Validator,
+    locked: jsonschema::Validator,
+}
+
+impl ArgsValidator {
+    fn compile(schema: &Value) -> Result<Self, String> {
+        Ok(Self {
+            strict: compile_validator(schema)?,
+            locked: build_validator(schema)?,
+        })
+    }
+
+    fn iter_errors<'a>(&'a self, args: &'a Value) -> impl Iterator<Item = jsonschema::ValidationError<'a>> + 'a {
+        self.strict.iter_errors(args).chain(self.locked.iter_errors(args))
+    }
 }
 
 /// RFC 6570 template -> anchored regex. Simple expansions never match `/`, `?`, `#`.
@@ -386,7 +420,7 @@ impl Monitor {
             .filter_map(|t| {
                 let name = t.get("name")?.as_str()?.to_string();
                 let schema = t.get("inputSchema").cloned().unwrap_or(json!({"type": "object"}));
-                Some((name, compile_validator(&schema)))
+                Some((name, ArgsValidator::compile(&schema)))
             })
             .collect();
         let templates = lock
@@ -987,16 +1021,19 @@ impl Monitor {
                         // Report schema keyword + location only: error messages from the validator
                         // quote the rejected *value*, which may be a secret the model was tricked
                         // into sending. Values must never reach the audit log.
-                        let errs: Vec<String> = v
-                            .iter_errors(&args)
-                            .take(3)
-                            .map(|e| {
-                                truncate(
-                                    &format!("violates `{}` at `{}`", e.schema_path(), e.instance_path()),
-                                    200,
-                                )
-                            })
-                            .collect();
+                        let mut errs: Vec<String> = Vec::new();
+                        for e in v.iter_errors(&args) {
+                            let msg = truncate(
+                                &format!("violates `{}` at `{}`", e.schema_path(), e.instance_path()),
+                                200,
+                            );
+                            if !errs.contains(&msg) {
+                                errs.push(msg);
+                            }
+                            if errs.len() == 3 {
+                                break;
+                            }
+                        }
                         if !errs.is_empty() {
                             return self.deny(
                                 id,
@@ -2244,6 +2281,104 @@ mod tests {
         let c = to_client(&r);
         assert_eq!(c[0]["id"], json!(42));
         assert_eq!(c[0]["result"]["content"][0]["text"], json!("3"));
+    }
+
+    /// A monitor whose only locked tool is `t`, with `schema` as its inputSchema.
+    fn mon_with_tool(schema: Value) -> (Monitor, Surface) {
+        let mut s = surface();
+        s.tools = vec![json!({"name": "t", "inputSchema": schema})];
+        let lock = ServerLock::from_surface(vec!["demo".into()], vec![], s.clone()).unwrap();
+        (Monitor::new(lock, Policy::default()), s)
+    }
+
+    #[test]
+    fn i2_negated_and_conditional_rules_of_the_locked_schema_are_enforced() {
+        // Strict mode must never weaken a locked rule: a stricter `not` or `if`
+        // matches less often, so it would let through what the lock forbids.
+        let cases = [
+            (cases_not_schema(), json!({"path": "/etc/shadow", "admin": true})),
+            (
+                json!({"type": "object",
+                    "properties": {"mode": {"type": "string"}, "path": {"type": "string"}},
+                    "if": {"properties": {"mode": {"const": "write"}}},
+                    "then": {"properties": {"path": {"pattern": "^/tmp/"}}}}),
+                json!({"mode": "write", "path": "/home/u/.bashrc"}),
+            ),
+        ];
+        for (schema, args) in cases {
+            assert!(
+                !jsonschema::validator_for(&schema).unwrap().is_valid(&args),
+                "sanity: the lock forbids {args}"
+            );
+            let (mut m, s) = mon_with_tool(schema);
+            handshake(&mut m, &s);
+            let a = call(&mut m, 3, "t", args.clone());
+            assert!(to_server(&a).is_empty(), "forwarded {args}");
+            assert_eq!(to_client(&a)[0]["error"]["code"], json!(INVALID_PARAMS));
+        }
+        // Control: what the `not` rule allows is still forwarded.
+        let (mut m, s) = mon_with_tool(cases_not_schema());
+        handshake(&mut m, &s);
+        assert_eq!(
+            to_server(&call(&mut m, 4, "t", json!({"path": "/tmp/x", "admin": false}))).len(),
+            1
+        );
+    }
+
+    fn cases_not_schema() -> Value {
+        json!({"type": "object",
+            "properties": {"path": {"type": "string"}, "admin": {"type": "boolean"}},
+            "not": {"properties": {"admin": {"const": true}}, "required": ["admin"]}})
+    }
+
+    #[test]
+    fn i2_undeclared_property_is_denied_in_nullable_and_map_value_objects() {
+        let (mut m, s) = mon_with_tool(json!({"type": "object", "properties": {
+            "o": {"type": ["object", "null"]},
+            "m": {"type": "object",
+                  "additionalProperties": {"type": "object", "properties": {"v": {"type": "string"}}}}}}));
+        handshake(&mut m, &s);
+        for (id, args) in [
+            (3, json!({"o": {"sidenote": "TOPSECRETVALUE"}})),
+            (4, json!({"m": {"k": {"v": "x", "sidenote": "TOPSECRETVALUE"}}})),
+        ] {
+            assert!(
+                to_server(&call(&mut m, id, "t", args.clone())).is_empty(),
+                "forwarded {args}"
+            );
+        }
+        for (id, args) in [(5, json!({"o": null})), (6, json!({"o": {}, "m": {"k": {"v": "x"}}}))] {
+            assert_eq!(
+                to_server(&call(&mut m, id, "t", args.clone())).len(),
+                1,
+                "denied valid {args}"
+            );
+        }
+    }
+
+    #[test]
+    fn i2_locked_schema_is_enforced_where_strict_mode_would_widen_it() {
+        // A stricter `contains` matches fewer items, so `maxContains` stops
+        // firing. Only checking the locked schema as written catches this.
+        let (mut m, s) = mon_with_tool(json!({"type": "object", "properties": {"users": {
+            "type": "array",
+            "items": {"type": "object", "properties": {"role": {"type": "string"}, "name": {"type": "string"}}},
+            "contains": {"properties": {"role": {"const": "admin"}}, "required": ["role"]},
+            "minContains": 0, "maxContains": 1}}}));
+        handshake(&mut m, &s);
+        let two_admins = json!({"users": [{"role": "admin", "name": "a"}, {"role": "admin", "name": "b"}]});
+        assert!(to_server(&call(&mut m, 3, "t", two_admins)).is_empty());
+        let one_admin = json!({"users": [{"role": "admin", "name": "a"}, {"role": "user", "name": "b"}]});
+        assert_eq!(to_server(&call(&mut m, 4, "t", one_admin)).len(), 1);
+    }
+
+    #[test]
+    fn i2_strictify_leaves_not_and_if_untouched() {
+        let sub = json!({"properties": {"admin": {"const": true}}, "required": ["admin"]});
+        let schema = json!({"type": "object", "not": sub, "if": sub, "then": {}});
+        let strict = strictify(&schema);
+        assert_eq!(strict["not"], sub);
+        assert_eq!(strict["if"], sub);
     }
 
     #[test]
