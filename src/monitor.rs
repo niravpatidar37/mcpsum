@@ -643,6 +643,13 @@ impl Monitor {
                 INVALID_REQUEST,
                 "mcpsum: jsonrpc must be \"2.0\"",
             )));
+            out.push(audit(
+                Dir::ClientToServer,
+                None,
+                None,
+                Decision::Drop,
+                "bad jsonrpc version",
+            ));
             return out;
         }
         let method = obj.get("method").and_then(Value::as_str).map(str::to_string);
@@ -655,17 +662,27 @@ impl Monitor {
                         INVALID_REQUEST,
                         "mcpsum: invalid request id",
                     )));
+                    out.push(audit(Dir::ClientToServer, None, None, Decision::Drop, "invalid id"));
                     return out;
                 }
                 self.client_request(id, m, params, &mut out);
             }
             (Some(m), None) => self.client_notification(m, params, &mut out),
             (None, Some(id)) => self.client_response(id, obj, &mut out),
-            (None, None) => out.push(Action::ToClient(error_msg(
-                Value::Null,
-                INVALID_REQUEST,
-                "mcpsum: invalid message",
-            ))),
+            (None, None) => {
+                out.push(Action::ToClient(error_msg(
+                    Value::Null,
+                    INVALID_REQUEST,
+                    "mcpsum: invalid message",
+                )));
+                out.push(audit(
+                    Dir::ClientToServer,
+                    None,
+                    None,
+                    Decision::Drop,
+                    "neither method nor id",
+                ));
+            }
         }
         out
     }
@@ -831,6 +848,13 @@ impl Monitor {
                 INVALID_REQUEST,
                 "mcpsum: already initialized",
             )));
+            out.push(audit(
+                Dir::ClientToServer,
+                Some("initialize"),
+                None,
+                Decision::Deny,
+                "already initialized",
+            ));
             return;
         }
         let Some(pv) = params.get("protocolVersion").and_then(Value::as_str) else {
@@ -839,6 +863,13 @@ impl Monitor {
                 INVALID_PARAMS,
                 "mcpsum: initialize requires protocolVersion",
             )));
+            out.push(audit(
+                Dir::ClientToServer,
+                Some("initialize"),
+                None,
+                Decision::Deny,
+                "initialize without protocolVersion",
+            ));
             return;
         };
         let mut fwd = json!({"protocolVersion": pv, "capabilities": {}});
@@ -2831,6 +2862,35 @@ mod tests {
             json!({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": 777}}),
         ));
         assert!(to_server(&a).is_empty());
+    }
+
+    #[test]
+    fn i8_client_side_rejections_are_audited_without_client_values() {
+        // Every rejection sent back to the client is also a decision for the
+        // log. Reasons are fixed strings: no client-written value is recorded.
+        let canary = "TOPSECRETVALUE";
+        let mut m = mon();
+        let msgs = [
+            json!({"jsonrpc": canary, "id": 1, "method": canary}),
+            json!({"jsonrpc": "2.0", "id": {"x": canary}, "method": canary}),
+            json!({"jsonrpc": "2.0", "params": {"x": canary}}),
+            json!({"jsonrpc": "2.0", "id": 2, "method": "initialize", "params": {"x": canary}}),
+            // a second `initialize`, sent after the handshake below
+            json!({"jsonrpc": "2.0", "id": 3, "method": "initialize", "params": {"protocolVersion": canary}}),
+        ];
+        for (i, msg) in msgs.into_iter().enumerate() {
+            if i == 4 {
+                handshake(&mut m, &surface());
+            }
+            let a = m.on_client_line(&b(msg.clone()));
+            assert!(to_server(&a).is_empty(), "{msg}");
+            assert_eq!(to_client(&a).len(), 1, "{msg}");
+            let ev = audits(&a);
+            assert_eq!(ev.len(), 1, "I8: {msg} rejected without an audit event");
+            assert!(matches!(ev[0].decision, Decision::Deny | Decision::Drop), "{:?}", ev[0]);
+            let logged = serde_json::to_string(&ev).unwrap();
+            assert!(!logged.contains(canary), "client value in the audit log: {logged}");
+        }
     }
 
     #[test]

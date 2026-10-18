@@ -36,6 +36,10 @@ All notable changes are recorded here. The format follows
   Existing entries keep their era.
 
 ### Fixed
+- I8: client messages the proxy rejects before any routing (a `jsonrpc` other than
+  `"2.0"`, an invalid id, neither `method` nor `id`, `initialize` without
+  `protocolVersion`, a second `initialize`) are now audited. They got an error but no
+  audit event. The reasons are fixed strings; no client value is logged.
 - `lock` and `verify` keep to `--timeout-secs` when a server floods requests. A server
   that sent pings and never read its stdin filled the pipe with mcpsum's replies and
   hung the probe forever; one that kept sending messages could hold it past the
