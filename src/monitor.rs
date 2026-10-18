@@ -973,6 +973,15 @@ impl Monitor {
         ));
     }
 
+    /// The request mcpsum opens the upstream with.
+    fn opening_method(&self) -> &'static str {
+        if self.upstream_modern {
+            "server/discover"
+        } else {
+            "initialize"
+        }
+    }
+
     /// A request to the server. A 2026-07-28 server gets mcpsum's own `_meta`
     /// (kept: only the progress token mcpsum validated).
     fn upstream_request(&self, id: u64, method: &str, mut params: Value) -> Action {
@@ -1688,11 +1697,17 @@ impl Monitor {
     /// the client; drift or failure quarantines (I7).
     fn upstream_opened(&mut self, obj: &Map<String, Value>, out: &mut Vec<Action>) {
         let res = obj.get("result");
-        let opening = if self.upstream_modern {
-            "server/discover"
-        } else {
-            "initialize"
-        };
+        let opening = self.opening_method();
+        if self.is_quarantined() {
+            // It timed out (I7): a late answer must not restart verification.
+            return out.push(audit(
+                Dir::ServerToClient,
+                Some(opening),
+                None,
+                Decision::Drop,
+                "answer after the server was quarantined",
+            ));
+        }
         let Some(caps) = res.and_then(|r| r.get("capabilities")).filter(|c| c.is_object()) else {
             return self.quarantine(format!("the server rejected or garbled {opening}"), out);
         };
@@ -1845,11 +1860,23 @@ impl Monitor {
 
     pub fn on_tick(&mut self, now_ms: u64) -> Vec<Action> {
         let mut out = Vec::new();
-        if self.phase == Phase::Verifying {
+        // mcpsum's own `initialize` / `server/discover` gets the same budget as
+        // verification: queued calls must not wait forever (I7).
+        let opening = self.phase == Phase::Initializing
+            && self
+                .pending
+                .values()
+                .any(|p| matches!(p, Pending::Initialize { client_id: None }));
+        if self.phase == Phase::Verifying || opening {
             match self.verify_started_ms {
                 None => self.verify_started_ms = Some(now_ms),
                 Some(t) if now_ms.saturating_sub(t) > self.policy.verify_timeout_ms => {
-                    self.quarantine("verification timed out".into(), &mut out);
+                    let why = if opening {
+                        format!("the server did not answer mcpsum's {} in time", self.opening_method())
+                    } else {
+                        "verification timed out".into()
+                    };
+                    self.quarantine(why, &mut out);
                 }
                 _ => {}
             }
@@ -2882,6 +2909,97 @@ mod tests {
     }
 
     // ---------------- I7: fail closed ----------------
+
+    #[test]
+    fn i7_unanswered_upstream_open_quarantines_and_answers_queued_calls() {
+        // mcpsum opens the server itself for a 2026-07-28 client, and for any
+        // client in front of a 2026-07-28 server. A server that never answers
+        // that `initialize` / `server/discover` must not hang queued calls.
+        let legacy = surface();
+        let modern = modern_lock().surface;
+        let legacy_open = json!({"protocolVersion": "2025-06-18", "capabilities": legacy.capabilities,
+            "serverInfo": legacy.server_info, "instructions": legacy.instructions});
+        let cases = [
+            ("modern client, legacy server", lock(), "initialize", legacy_open),
+            (
+                "modern client, modern server",
+                modern_lock(),
+                "server/discover",
+                discover_result(&modern),
+            ),
+            (
+                "legacy client, modern server",
+                modern_lock(),
+                "server/discover",
+                discover_result(&modern),
+            ),
+        ];
+        for (what, l, opening, late_answer) in cases {
+            let mut m = Monitor::new(l, Policy::default());
+            let a = if what.starts_with("legacy client") {
+                let a = m.on_client_line(&b(json!({"jsonrpc": "2.0", "id": 0, "method": "initialize",
+                    "params": {"protocolVersion": "2025-06-18", "capabilities": {}}})));
+                assert!(
+                    to_client(&a)[0].get("result").is_some(),
+                    "{what}: answered from the lock"
+                );
+                let q = call(&mut m, 1, "add", json!({"a": 1, "b": 2}));
+                assert!(to_client(&q).is_empty() && to_server(&q).is_empty(), "{what}: queued");
+                a
+            } else {
+                m.on_client_line(&modern_call(1))
+            };
+            let up = to_server(&a);
+            assert_eq!(up.len(), 1, "{what}");
+            assert_eq!(up[0]["method"], json!(opening), "{what}");
+            let timeout = m.policy.verify_timeout_ms;
+            assert!(m.on_tick(1_000).is_empty(), "{what}");
+            assert!(m.on_tick(1_000 + timeout).is_empty(), "{what}");
+            assert!(!m.is_quarantined(), "{what}");
+            let a = m.on_tick(1_001 + timeout);
+            assert!(m.is_quarantined(), "{what}: never quarantined");
+            let c = to_client(&a);
+            assert_eq!(c.len(), 1, "{what}: {c:?}");
+            assert_eq!(
+                (&c[0]["id"], &c[0]["error"]["code"]),
+                (&json!(1), &json!(QUARANTINED)),
+                "{what}"
+            );
+            let q: Vec<AuditEvent> = audits(&a)
+                .into_iter()
+                .filter(|e| e.decision == Decision::Quarantine)
+                .collect();
+            assert_eq!(q.len(), 1, "{what}");
+            assert!(
+                q[0].reason.contains(opening) && q[0].reason.contains("in time"),
+                "{what}: {}",
+                q[0].reason
+            );
+            // A late answer cannot lift the quarantine or restart verification.
+            let late = m.on_server_line(&b(json!({"jsonrpc": "2.0", "id": up[0]["id"], "result": late_answer})));
+            assert!(m.is_quarantined(), "{what}: late answer lifted the quarantine");
+            assert!(
+                to_server(&late).is_empty() && to_client(&late).is_empty(),
+                "{what}: {late:?}"
+            );
+            assert!(audits(&late).iter().any(|e| e.decision == Decision::Drop), "{what}");
+        }
+        // A legacy client's own `initialize` is only relayed: its timeout is
+        // the client's, and a slow server start is still answered.
+        let mut m = mon();
+        let a = m.on_client_line(&b(json!({"jsonrpc": "2.0", "id": 0, "method": "initialize",
+            "params": {"protocolVersion": "2025-06-18", "capabilities": {}}})));
+        m.on_tick(1_000);
+        assert!(m.on_tick(2_000 + m.policy.verify_timeout_ms).is_empty());
+        let s = surface();
+        let res = json!({"protocolVersion": "2025-06-18", "capabilities": s.capabilities,
+            "serverInfo": s.server_info, "instructions": s.instructions});
+        let r = m.on_server_line(&b(
+            json!({"jsonrpc": "2.0", "id": to_server(&a)[0]["id"], "result": res}),
+        ));
+        assert!(!m.is_quarantined());
+        assert_eq!(to_client(&r)[0]["id"], json!(0));
+    }
 
     #[test]
     fn i7_spoofed_and_duplicate_responses_are_dropped() {

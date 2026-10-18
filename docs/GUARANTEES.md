@@ -389,13 +389,17 @@ recorded before delivery).
 The client never sees server-side request ids, because mcpsum rewrites them.
 If the audit log cannot be written, the proxy stops: audit entries are written
 *before* their effects. A server that stops reading its input makes the proxy
-quarantine it and exit, rather than hang.
+quarantine it and exit, rather than hang. A server that does not answer
+mcpsum's own `initialize` or `server/discover` (sent for a 2026-07-28 client,
+or in front of a 2026-07-28 server) within the verification timeout (30 s) is
+quarantined, and every queued call gets `-32002`; a late answer is dropped.
 
 **Tests.** `i7_garbage_oversize_and_batches_are_rejected`,
 `i7_calls_before_initialize_are_not_forwarded`,
 `i7_duplicate_pending_client_id_rejected`,
 `i7_spoofed_and_duplicate_responses_are_dropped`,
 `i7_client_cancel_is_translated_to_proxy_id`,
+`i7_unanswered_upstream_open_quarantines_and_answers_queued_calls`,
 `i7_redos_patterns_in_locked_schemas_run_in_linear_time` (catastrophic regexes in locked
 schemas run in linear time or fail closed at compile time),
 `write_ahead_fails_closed_when_audit_cannot_be_written` (`src/proxy.rs`),

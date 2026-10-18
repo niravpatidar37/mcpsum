@@ -51,6 +51,12 @@ All notable changes are recorded here. The format follows
   Existing entries keep their era.
 
 ### Fixed
+- The proxy no longer waits forever when a server does not answer the `initialize` or
+  `server/discover` that mcpsum sends itself (for a 2026-07-28 client, or in front of a
+  2026-07-28 server). Only verification had a timeout, so such a session stayed in its
+  opening phase and every queued call went unanswered. The opening now gets the same
+  30 s budget (`verify_timeout_ms`): the server is quarantined (audited), queued calls
+  get `-32002`, and a late answer is dropped instead of restarting verification.
 - I5 egress proxy: a refused client that kept sending a byte at a time held its
   connection open for as long as it liked, and when the refusal was for too many
   connections (503) it blocked the proxy from accepting anyone else. Draining a refused
