@@ -14,6 +14,10 @@ All notable changes are recorded here. The format follows
   nested objects typed `["object", "null"]` and in object schemas under
   `additionalProperties`/`unevaluatedProperties`. Affects 0.2.0 and earlier
   (GHSA-h84p-xpp4-jghw).
+- I1: the `protocolVersion` in a legacy server's `initialize` result is no longer relayed
+  to the client verbatim. The client gets mcpsum's own copy of a revision it knows, or
+  the locked value; any other string is refused and quarantines the session. Before, a
+  server could put free text there and it reached the client.
 
 ### Added
 - `lock` and `verify` for servers that speak only MCP 2026-07-28 (#21). `lock` now
