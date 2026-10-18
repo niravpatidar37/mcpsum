@@ -14,6 +14,13 @@ All notable changes are recorded here. The format follows
   nested objects typed `["object", "null"]` and in object schemas under
   `additionalProperties`/`unevaluatedProperties`. Affects 0.2.0 and earlier
   (GHSA-h84p-xpp4-jghw).
+- I5: a sandboxed server under a home directory reached through a symlink
+  (`/home -> /var/home` on Fedora Silverblue and other ostree systems, a home moved to
+  another disk) could read the whole home directory, `~/.ssh` included. The grant for
+  the program's install prefix compared the resolved program path with the unresolved
+  `$HOME`, so `~/bin/server` was granted the real home directory. Both sides are now
+  compared as given and resolved through symlinks, and a prefix that resolves to `/`
+  is narrowed like `/` itself.
 - I1: the `protocolVersion` in a legacy server's `initialize` result is no longer relayed
   to the client verbatim. The client gets mcpsum's own copy of a revision it knows, or
   the locked value; any other string is refused and quarantines the session. Before, a
