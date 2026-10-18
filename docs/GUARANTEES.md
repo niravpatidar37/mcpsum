@@ -205,6 +205,7 @@ cannot be enforced:
     `169.254.169.254`), CGNAT and other non-public answers are refused unless
     that IP is listed. This stops DNS rebinding into your machine or network.
   - Requests are bounded: 8 KiB head, 5 s to send it, 64 open connections.
+    A refused client is closed at most 1 s after its answer.
     Other methods get 405.
   - Every connection is written to the audit log **before** it is opened:
     `egress/connect`, `host:port`, allow or deny. Headers, paths and payloads
@@ -283,6 +284,7 @@ Each network layer alone: `i5_seccomp_alone_blocks_tcp_and_udp`,
 `i5_namespace_alone_has_only_loopback`. The proxy:
 `i5_proxy_tunnels_only_to_listed_destinations_and_audits_each`,
 `i5_proxy_bounds_head_size_time_and_connections`,
+`i5_refused_client_dripping_bytes_cannot_stall_the_proxy`,
 `i5_proxy_does_not_connect_when_the_audit_log_fails`,
 `i5_decide_refuses_raw_ips_and_names_resolving_inward`, and the fuzz target
 `egress_head`. Grant rules:
