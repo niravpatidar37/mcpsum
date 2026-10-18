@@ -373,7 +373,7 @@ recorded before delivery).
 
 - malformed JSON
 - JSON-RPC batches
-- lines over 4 MiB
+- lines over 4 MiB (not counting the LF or CRLF line ending)
 - calls sent before `initialize` completes
 - duplicate in-flight client ids
 - responses that do not match an open request, or that answer one twice
@@ -391,7 +391,9 @@ quarantine it and exit, rather than hang.
 `i7_client_cancel_is_translated_to_proxy_id`,
 `i7_redos_patterns_in_locked_schemas_run_in_linear_time` (catastrophic regexes in locked
 schemas run in linear time or fail closed at compile time),
-`write_ahead_fails_closed_when_audit_cannot_be_written` (`src/proxy.rs`).
+`write_ahead_fails_closed_when_audit_cannot_be_written` (`src/proxy.rs`),
+`i7_framing_buffers_at_most_one_line` (`tests/framing_memory.rs`: a peer that never
+sends a newline cannot make mcpsum buffer more than one line).
 e2e: `test_I7_spoofed_and_duplicate_responses_are_dropped`,
 `test_I7_garbage_oversize_and_log_injection_are_dropped`,
 `test_I7_deaf_server_cannot_hang_proxy_shutdown`. Property: invariant I7.
