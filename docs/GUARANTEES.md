@@ -33,7 +33,9 @@ nightly.
 **Statement.** After approval, no definition text written by the server reaches
 the client. `tools/list`, `prompts/list`, `resources/list`,
 `resources/templates/list`, `serverInfo`, `instructions` and the advertised
-capabilities are answered from `mcp.lock`. For a 2026-07-28 client (no
+capabilities are answered from `mcp.lock`. The negotiated `protocolVersion` is
+mcpsum's own copy of a revision it knows (or the locked string); a server
+that answers `initialize` with any other value is quarantined. For a 2026-07-28 client (no
 `initialize`, version in each request's `_meta`), so is `server/discover`,
 and every result carries the locked `serverInfo`; the server's own
 `server/discover` is never consulted. The live server is asked for its
@@ -64,6 +66,7 @@ monitor never forwards one.
 `i1_all_list_kinds_served_from_lock`,
 `i1_initialize_returns_locked_instructions_and_server_info_even_if_server_lies`,
 `i1_initialize_error_text_from_server_is_not_forwarded` (found by the property test),
+`i1_initialize_protocol_version_is_never_server_text`,
 `i1_tool_drift_during_verification_quarantines_and_poison_never_reaches_client`,
 `i1_list_changed_is_not_forwarded_and_triggers_reverification`,
 `i1_verification_follows_pagination`, `i1_verification_timeout_quarantines`,
@@ -95,8 +98,11 @@ Property: invariant I1 in `tests/properties.rs`, also with a 2026-07-28 server.
 arguments that validate against the **locked** `inputSchema` as written *and*
 under strict rules. Any property the schema does not declare is rejected, unless
 the schema explicitly sets `additionalProperties`. Nested object schemas inside
-`allOf`/`anyOf`/`oneOf` are not made strict (only the locked schema applies
-there). `prompts/get` is checked against the
+`allOf`/`anyOf`/`oneOf`, `if`/`then`/`else`, `not` and `dependentSchemas` are
+not made strict (only the locked schema applies there): they describe the same
+object as their parent. `$defs`/`definitions` entries are made strict, which
+fails closed: a call can be denied when an entry used from `allOf` sits next to
+other declared properties. `prompts/get` is checked against the
 locked prompt's argument names. `resources/read` is limited to locked URIs and
 locked URI templates. Schemas with remote `$ref`s fail closed.
 
@@ -114,6 +120,8 @@ with `~/.ssh/id_rsa`). The call is refused before it reaches the server.
 `i2_undeclared_property_is_denied_in_nullable_and_map_value_objects`,
 `i2_locked_schema_is_enforced_where_strict_mode_would_widen_it`,
 `i2_strictify_leaves_not_and_if_untouched`,
+`i2_same_instance_applicators_accept_declared_and_deny_undeclared`,
+`i2_defs_used_from_allof_stay_strict_and_fail_closed`,
 `i2_prompt_get_checks_name_and_argument_names`,
 `i2_resource_read_limited_to_locked_uris_and_templates`,
 `i2_valid_call_is_forwarded_with_rewritten_id_and_response_mapped_back`.
@@ -200,6 +208,7 @@ cannot be enforced:
     `169.254.169.254`), CGNAT and other non-public answers are refused unless
     that IP is listed. This stops DNS rebinding into your machine or network.
   - Requests are bounded: 8 KiB head, 5 s to send it, 64 open connections.
+    A refused client is closed at most 1 s after its answer.
     Other methods get 405.
   - Every connection is written to the audit log **before** it is opened:
     `egress/connect`, `host:port`, allow or deny. Headers, paths and payloads
@@ -282,10 +291,12 @@ Each network layer alone: `i5_seccomp_alone_blocks_tcp_and_udp`,
 `i5_namespace_alone_has_only_loopback`. The proxy:
 `i5_proxy_tunnels_only_to_listed_destinations_and_audits_each`,
 `i5_proxy_bounds_head_size_time_and_connections`,
+`i5_refused_client_dripping_bytes_cannot_stall_the_proxy`,
 `i5_proxy_does_not_connect_when_the_audit_log_fails`,
 `i5_decide_refuses_raw_ips_and_names_resolving_inward`, and the fuzz target
 `egress_head`. Grant rules:
 `i5_grant_is_deny_by_default_and_never_includes_home`,
+`i5_program_in_a_symlinked_home_does_not_expose_the_home_directory`,
 `i5_writes_that_would_cover_mcpsum_files_or_home_are_refused`.
 Mutation-checked: removing Landlock, seccomp, either network layer, the
 namespace rules or the protected-path check each fails a test. So does
@@ -356,8 +367,10 @@ server's annotations for you to review.
 `i6_approval_prompt_names_tool_and_source_and_escapes_the_arguments`,
 `i6_unanswered_approval_times_out_denies_and_withdraws_the_prompt`,
 `i6_quarantine_denies_held_calls`,
+`i6_late_response_to_a_cancelled_source_call_is_dropped_and_does_not_taint`,
 `i6_progress_text_from_a_source_taints_before_it_is_delivered`,
 `i6_policy_naming_an_unlocked_tool_is_rejected`,
+`i6_misspelled_policy_key_on_a_server_entry_is_rejected`,
 `i6_marker_is_shared_by_every_store_of_a_session_and_cleared_only_by_reset`,
 `i6_session_ids_cannot_escape_the_state_directory` and the other `i6_*` unit tests.
 e2e: `test_I6_injected_result_cannot_trigger_a_sink_when_the_client_cannot_prompt`,
@@ -377,25 +390,38 @@ recorded before delivery).
 
 - malformed JSON
 - JSON-RPC batches
-- lines over 4 MiB
+- lines over 4 MiB (not counting the LF or CRLF line ending)
 - calls sent before `initialize` completes
 - duplicate in-flight client ids
 - responses that do not match an open request, or that answer one twice
   (spoofed ids)
+- a response to a request the client cancelled (`notifications/cancelled`). A
+  cancelled call frees its slot, id and progress token at once; a call still
+  queued for verification is dropped and never sent. The client can cancel only
+  its own calls, never `initialize` or mcpsum's own requests
 
 The client never sees server-side request ids, because mcpsum rewrites them.
 If the audit log cannot be written, the proxy stops: audit entries are written
 *before* their effects. A server that stops reading its input makes the proxy
-quarantine it and exit, rather than hang.
+quarantine it and exit, rather than hang. A server that does not answer
+mcpsum's own `initialize` or `server/discover` (sent for a 2026-07-28 client,
+or in front of a 2026-07-28 server) within the verification timeout (30 s) is
+quarantined, and every queued call gets `-32002`; a late answer is dropped.
 
 **Tests.** `i7_garbage_oversize_and_batches_are_rejected`,
 `i7_calls_before_initialize_are_not_forwarded`,
 `i7_duplicate_pending_client_id_rejected`,
 `i7_spoofed_and_duplicate_responses_are_dropped`,
 `i7_client_cancel_is_translated_to_proxy_id`,
+`i7_cancelled_call_frees_its_slot_and_id_and_its_late_response_is_dropped`,
+`i7_cancelled_queued_call_is_never_forwarded`,
+`i7_client_cannot_cancel_mcpsum_own_requests`,
+`i7_unanswered_upstream_open_quarantines_and_answers_queued_calls`,
 `i7_redos_patterns_in_locked_schemas_run_in_linear_time` (catastrophic regexes in locked
 schemas run in linear time or fail closed at compile time),
-`write_ahead_fails_closed_when_audit_cannot_be_written` (`src/proxy.rs`).
+`write_ahead_fails_closed_when_audit_cannot_be_written` (`src/proxy.rs`),
+`i7_framing_buffers_at_most_one_line` (`tests/framing_memory.rs`: a peer that never
+sends a newline cannot make mcpsum buffer more than one line).
 e2e: `test_I7_spoofed_and_duplicate_responses_are_dropped`,
 `test_I7_garbage_oversize_and_log_injection_are_dropped`,
 `test_I7_deaf_server_cannot_hang_proxy_shutdown`. Property: invariant I7.
@@ -407,12 +433,18 @@ Fuzz: `monitor_session`, `framing`, `lock_parse`.
 to a JSON Lines log at `<lock dir>/.mcpsum-audit/<name>.jsonl`. Each entry
 includes the SHA-256 of the previous one, starting from an all-zero genesis
 hash. `mcpsum audit-verify` recomputes the chain and reports the first entry
-that was edited, inserted or deleted.
+that was edited, inserted or deleted. A server name that would put the log
+outside `.mcpsum-audit/` is refused ([LOCKFILE.md](LOCKFILE.md#fields)).
 
 Several proxies may write the same log at once (VS Code runs MCP servers in two
 processes): every append takes an exclusive cross-process lock, re-reads the chain
 head and checks its hash, then writes one complete line, so the log stays a single
 chain. A head that fails its hash check is never extended; the proxy fails closed.
+Peer text in an entry is truncated (method 100, subject 200, reason 1000 characters),
+and the log refuses to write an entry over 1 MiB, the most it reads back as a head.
+When the proxy starts, a log that fails verification or that it could not extend
+(not valid UTF-8, no final newline, a blank or oversized last line) is moved aside
+unchanged as `<name>.corrupt-<ms>.jsonl` and a new chain starts.
 
 Argument **values** are never logged. Only their canonical digest
 (RFC 8785 JSON, SHA-256) is recorded.
@@ -422,7 +454,9 @@ can truncate the log, or rewrite all of it. To catch that, anchor the head
 hash somewhere they cannot write.
 
 **Tests.** `i8_allowed_calls_are_audited_with_args_digest_not_args`,
-`i8_denied_argument_values_never_appear_in_audit_or_error`, `audit::tests::*`,
+`i8_denied_argument_values_never_appear_in_audit_or_error`,
+`i8_audit_entries_stay_bounded_whatever_the_peer_sends`, `audit::tests::*`,
+`i8_client_side_rejections_are_audited_without_client_values`, `audit::tests::*`,
 `concurrent_writers_keep_one_valid_chain` (8 writers × 50 appends).
 e2e: `test_I8_audit_log_verifies_and_detects_tampering`,
 `test_I8_two_proxies_for_one_server_keep_one_valid_chain`.
@@ -445,7 +479,8 @@ e2e: `test_I8_audit_log_verifies_and_detects_tampering`,
 - **Safe rendering.** Every server-authored string shown by `lock`, `verify`,
   `show`, or relayed from server stderr is escaped. Control characters,
   bidi overrides (Trojan Source, CVE-2021-42574), zero-width and Unicode
-  tag characters are shown as `<U+XXXX>`. Tests: `render::tests::*`,
+  tag characters, and every other Unicode default-ignorable code point
+  (invisible by definition) are shown as `<U+XXXX>`. Tests: `render::tests::*`,
   `test_server_stderr_cannot_inject_terminal_escapes`.
 
 ## Planned (not yet implemented)
