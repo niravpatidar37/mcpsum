@@ -434,6 +434,27 @@ def test_lock_time_findings_flag_hidden_characters_and_injection_markers(tmp_pat
     lock_evil(tmp_path, "rugpull", poison_file=poison, extra=("--deny-findings",), expect_rc=2)
 
 
+# ------------------------------------------------- exit codes
+
+@pytest.mark.parametrize("argv", [
+    (),
+    ("nope",),
+    ("verify", "--bogus"),
+    ("lock", "--name", "x", "--deny-findings"),
+])
+def test_usage_errors_exit_3_not_the_findings_code(argv):
+    # Exit 2 means "findings with lock --deny-findings"; CI must not read a typo as that.
+    r = run(*argv)
+    assert r.returncode == 3, r
+    assert r.stdout == "" and "Usage:" in r.stderr, r
+
+
+@pytest.mark.parametrize("argv", [("--help",), ("--version",), ("help", "lock")])
+def test_help_and_version_exit_0_on_stdout(argv):
+    r = run(*argv)
+    assert r.returncode == 0 and r.stdout and r.stderr == "", r
+
+
 # ------------------------------------------------- verify semantics
 
 def test_verify_ignores_informational_drift_unless_strict(tmp_path):

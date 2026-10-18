@@ -133,8 +133,26 @@ enum TaintCmd {
     },
 }
 
+/// Exit code for a `Cli::try_parse` error. clap would exit 2 on a usage
+/// error, which here means "findings", so map it to `EXIT_ERROR`; a help or
+/// version request (printed to stdout) stays a success.
+fn parse_error_code(e: &clap::Error) -> u8 {
+    if e.use_stderr() {
+        EXIT_ERROR
+    } else {
+        EXIT_OK
+    }
+}
+
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(e) => {
+            // Same output as `Cli::parse` (help/version on stdout, errors on stderr).
+            let _ = e.print();
+            return ExitCode::from(parse_error_code(&e));
+        }
+    };
     let result = match cli.cmd {
         Cmd::Lock {
             lock,
@@ -473,5 +491,45 @@ fn cmd_sandbox_exec(spec: &str, command: &[String]) -> Result<u8> {
     {
         let _ = (spec, command);
         bail!("sandboxes are enforced on Linux only so far; refusing to start the server")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse_code(argv: &[&str]) -> u8 {
+        let e = Cli::try_parse_from(argv)
+            .err()
+            .expect("clap returns an error or a help/version request");
+        parse_error_code(&e)
+    }
+
+    #[test]
+    fn usage_errors_exit_3_not_the_findings_code() {
+        // README "Exit code" table: 2 = findings with `lock --deny-findings`,
+        // 3 = usage, I/O or protocol error. clap alone would exit 2.
+        for argv in [
+            &["mcpsum"][..],
+            &["mcpsum", "nope"],
+            &["mcpsum", "verify", "--bogus"],
+            &["mcpsum", "lock", "--name", "x", "--deny-findings"],
+            &["mcpsum", "verify", "--timeout-secs", "soon"],
+        ] {
+            assert_eq!(parse_code(argv), EXIT_ERROR, "{argv:?}");
+        }
+    }
+
+    #[test]
+    fn help_and_version_exit_0() {
+        for argv in [
+            &["mcpsum", "--help"][..],
+            &["mcpsum", "-V"],
+            &["mcpsum", "--version"],
+            &["mcpsum", "help", "lock"],
+            &["mcpsum", "verify", "-h"],
+        ] {
+            assert_eq!(parse_code(argv), EXIT_OK, "{argv:?}");
+        }
     }
 }
