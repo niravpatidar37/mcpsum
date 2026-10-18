@@ -14,6 +14,9 @@ All notable changes are recorded here. The format follows
   nested objects typed `["object", "null"]` and in object schemas under
   `additionalProperties`/`unevaluatedProperties`. Affects 0.2.0 and earlier
   (GHSA-h84p-xpp4-jghw).
+- I5/I6: a server entry in `mcp.lock` with a key mcpsum does not know is now refused.
+  Before, a misspelled `policy` key (`polcy`, `Policy`) was ignored, so the entry
+  loaded with taint tracking and its sandbox silently off. Affects 0.2.0 and earlier.
 
 ### Added
 - `lock` and `verify` for servers that speak only MCP 2026-07-28 (#21). `lock` now
