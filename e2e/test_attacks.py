@@ -434,6 +434,15 @@ def test_lock_time_findings_flag_hidden_characters_and_injection_markers(tmp_pat
     lock_evil(tmp_path, "rugpull", poison_file=poison, extra=("--deny-findings",), expect_rc=2)
 
 
+def test_show_unknown_name_fails_like_verify(tmp_path):
+    lockp = lock_evil(tmp_path, "clean")
+    r = run("show", "--lock", str(lockp), "--name", "evil")
+    assert r.returncode == 0 and "server `evil`" in r.stdout, r
+    for cmd in ("show", "verify"):
+        r = run(cmd, "--lock", str(lockp), "--name", "nope")
+        assert r.returncode == 3 and "`nope` is not in the lockfile" in r.stderr, (cmd, r)
+
+
 # ------------------------------------------------- verify semantics
 
 def test_verify_ignores_informational_drift_unless_strict(tmp_path):

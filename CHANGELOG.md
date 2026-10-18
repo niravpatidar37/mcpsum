@@ -34,6 +34,11 @@ All notable changes are recorded here. The format follows
 - A fresh `lock` of a server that speaks both eras now records it as 2026-07-28.
   Existing entries keep their era.
 
+### Fixed
+- `show --name <name>` now fails (exit 3, "server `<name>` is not in the lockfile") when
+  the name is not locked, like `verify`, `suggest-policy` and `proxy`. Before, a typo
+  printed nothing and exited 0, which looked like an empty review.
+
 ## [0.2.0] - 2026-10-13
 
 ### Added
