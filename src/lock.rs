@@ -613,11 +613,12 @@ impl LockFile {
         }
     }
 
-    /// Never downgrades a file, and bumps it only when an entry needs it, so
-    /// a lockfile without 2026-07-28 servers stays readable by older mcpsum.
+    /// Always writes the lowest version that describes the entries, so a
+    /// lockfile without 2026-07-28 servers (also once the last one is gone)
+    /// stays readable by mcpsum 0.2.0 and older.
     pub fn to_pretty(&self) -> Result<String> {
         let mut lf = self.clone();
-        lf.lockfile_version = lf.lockfile_version.max(lf.needed_version());
+        lf.lockfile_version = lf.needed_version();
         Ok(serde_json::to_string_pretty(&lf)? + "\n")
     }
 
@@ -1019,6 +1020,26 @@ pub(crate) mod tests {
         assert!(LockFile::parse(&v2.replace("\"lockfileVersion\": 2,", "\"lockfileVersion\": 1,")).is_err());
         assert!(LockFile::parse(&v1.replace("\"lockfileVersion\": 1,", "\"lockfileVersion\": 3,")).is_err());
         assert!(LockFile::parse(&v1.replace("\"lockfileVersion\": 1,", "\"lockfileVersion\": 0,")).is_err());
+    }
+
+    /// LOCKFILE.md: "mcpsum writes `1` unless an entry needs `2` ..., so a
+    /// lockfile without such a server stays readable by mcpsum 0.2.0 and
+    /// older." That holds after the last 2026-07-28 entry is gone, too.
+    #[test]
+    fn lockfile_without_modern_entries_is_written_as_version_1_again() {
+        let mut lf = LockFile::new();
+        lf.servers.insert(
+            "m".into(),
+            ServerLock::from_surface(vec!["m".into()], vec![], modern_surface()).unwrap(),
+        );
+        let mut lf = LockFile::parse(&lf.to_pretty().unwrap()).unwrap();
+        assert_eq!(lf.lockfile_version, 2);
+        // The modern entry is re-locked as a legacy server (or removed by hand).
+        lf.servers.insert("m".into(), sample_lock());
+        let text = lf.to_pretty().unwrap();
+        assert!(text.contains("\"lockfileVersion\": 1,"), "{}", &text[..40]);
+        lf.servers.clear();
+        assert!(lf.to_pretty().unwrap().contains("\"lockfileVersion\": 1,"));
     }
 
     #[test]

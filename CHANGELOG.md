@@ -17,14 +17,30 @@ All notable changes are recorded here. The format follows
 - I5/I6: a server entry in `mcp.lock` with a key mcpsum does not know is now refused.
   Before, a misspelled `policy` key (`polcy`, `Policy`) was ignored, so the entry
   loaded with taint tracking and its sandbox silently off. Affects 0.2.0 and earlier.
+- I8: one client request could block a server's audit log for good. A `tools/call` or
+  `prompts/get` for an unknown name (lines up to 4 MiB are accepted) was logged with
+  the name untruncated; every later append, and every proxy start for that server, then
+  refused the over-1 MiB head, so the proxy failed closed until the log was moved by
+  hand. Audit entries now truncate method (100 chars), subject (200) and reason (1000),
+  and the log refuses to write an entry it could not read back; a refused write still
+  stops the batch before anything is forwarded.
+
+### Fixed
+- Audit log: the proxy no longer keeps a log it cannot extend. A log that is not valid
+  UTF-8 (a write torn inside a multi-byte character) stopped every proxy start, and a
+  log missing its final newline, ending in a blank line or with a last entry over 1 MiB
+  was kept but refused by every append. All of them are now moved aside unchanged as
+  `<name>.corrupt-<ms>.jsonl` and a new chain starts. `audit-verify` reports a log that
+  is not valid UTF-8 as `TAMPERED` (exit 1) instead of an I/O error (exit 3).
 
 ### Added
 - `lock` and `verify` for servers that speak only MCP 2026-07-28 (#21). `lock` now
   detects a server's era the way the spec asks a dual-era client to on stdio:
   `server/discover` first, `initialize` after any other error or no answer, never after a
   2026-07-28 error (`-32021`, `-32022`). A 2026-07-28 entry records `supportedVersions`
-  and needs `lockfileVersion: 2`; files without one stay at version 1, so older mcpsum
-  still reads them, and versions other than 1 and 2 are refused. `verify` and a re-lock
+  and needs `lockfileVersion: 2`; files without one are written as version 1 (also once
+  the last such entry is gone), so older mcpsum still reads them, and versions other
+  than 1 and 2 are refused. `verify` and a re-lock
   ask an existing entry in its own era first; a change of era is definitional drift.
 - The proxy in front of servers that speak only MCP 2026-07-28 (#21). It never sends
   them `initialize`: it answers a legacy client's `initialize` from the lock, opens the
@@ -36,6 +52,55 @@ All notable changes are recorded here. The format follows
 ### Changed
 - A fresh `lock` of a server that speaks both eras now records it as 2026-07-28.
   Existing entries keep their era.
+
+### Fixed
+- Client cancellation (`notifications/cancelled`) now follows the MCP spec: a cancelled
+  call frees its pending slot, request id and progress token at once, and a late
+  response from the server is dropped (audited) instead of reaching the client. Before,
+  every cancelled call kept its slot until the server answered, so after `max_pending`
+  (256) unanswered cancels each new call was refused with `-32001`, and a cancelled id
+  could not be reused. A call cancelled while still queued for drift verification is now
+  dropped (audited) and never sent; before, it still ran on the server after verification.
+- The proxy no longer waits forever when a server does not answer the `initialize` or
+  `server/discover` that mcpsum sends itself (for a 2026-07-28 client, or in front of a
+  2026-07-28 server). Only verification had a timeout, so such a session stayed in its
+  opening phase and every queued call went unanswered. The opening now gets the same
+  30 s budget (`verify_timeout_ms`): the server is quarantined (audited), queued calls
+  get `-32002`, and a late answer is dropped instead of restarting verification.
+- I5 egress proxy: a refused client that kept sending a byte at a time held its
+  connection open for as long as it liked, and when the refusal was for too many
+  connections (503) it blocked the proxy from accepting anyone else. Draining a refused
+  request now stops after 1 s in total, and 503 answers are sent off the accept thread
+  (at most 16 at once; beyond that the connection is closed unanswered).
+- I2: valid tool calls are no longer denied when the locked `inputSchema` uses
+  `dependentSchemas` or `if`/`then`/`else`. Strict mode added
+  `additionalProperties: false` inside those subschemas, which describe the same object
+  as their parent, so they rejected properties the parent declares. Undeclared
+  properties are still rejected at the parent. `$defs` entries used from `allOf` stay
+  strict (fail closed); see `strictify`.
+- I8: client messages the proxy rejects before any routing (a `jsonrpc` other than
+  `"2.0"`, an invalid id, neither `method` nor `id`, `initialize` without
+  `protocolVersion`, a second `initialize`) are now audited. They got an error but no
+  audit event. The reasons are fixed strings; no client value is logged.
+- `lock` and `verify` keep to `--timeout-secs` when a server floods requests. A server
+  that sent pings and never read its stdin filled the pipe with mcpsum's replies and
+  hung the probe forever; one that kept sending messages could hold it past the
+  timeout. Replies are now written on their own thread (the probe fails once 256 are
+  pending), and messages that arrive after the deadline are no longer read.
+- Safe rendering now shows the shorthand format controls U+1BCA0..U+1BCA3 as
+  `<U+XXXX>`. They are invisible and passed through `show`, `lock`/`verify` output and
+  findings unseen. The reserved default-ignorable ranges U+FFF0..U+FFF8,
+  U+E0080..U+E00FF and U+E01F0..U+E0FFF are shown too, so every Unicode 18.0
+  Default_Ignorable_Code_Point is covered, and a test checks the full list.
+- The per-line size limit (4 MiB) no longer counts the CR of a CRLF line ending, so a
+  message of exactly the limit is accepted with CRLF as it is with LF. Memory stays
+  bounded to one line, now checked by a test that counts allocations.
+- `show --name <name>` now fails (exit 3, "server `<name>` is not in the lockfile") when
+  the name is not locked, like `verify`, `suggest-policy` and `proxy`. Before, a typo
+  printed nothing and exited 0, which looked like an empty review.
+- Command-line usage errors (unknown flag, missing argument, no subcommand) now exit 3
+  as documented, not clap's 2, which mcpsum uses for `lock --deny-findings` findings.
+  Help and version output still exit 0, and messages are unchanged.
 
 ## [0.2.0] - 2026-10-13
 

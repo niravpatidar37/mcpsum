@@ -48,7 +48,7 @@ use a lockfile whose digests do not match its contents.
 
 | Field | Meaning |
 |---|---|
-| `lockfileVersion` | Format version, `1` or `2`. mcpsum writes `1` unless an entry needs `2` (a [2026-07-28 server](#protocol-era)), so a lockfile without such a server stays readable by mcpsum 0.2.0 and older. Any other version, and a version-1 file with a `supportedVersions` entry, are rejected. |
+| `lockfileVersion` | Format version, `1` or `2`. mcpsum writes `1` unless an entry needs `2` (a [2026-07-28 server](#protocol-era)), so a lockfile without such a server stays readable by mcpsum 0.2.0 and older. This is decided on every write: a file goes back to `1` once its last such entry is removed or re-locked over `initialize`. Any other version, and a version-1 file with a `supportedVersions` entry, are rejected. |
 | `generator` | The mcpsum version that wrote the file. Informational. |
 | `servers.<name>` | One entry per server. `<name>` is what you pass to `--name` and use in your client config. |
 | `command` | The exact argv the proxy runs. **The proxy never takes a command from the client config**, so the config and the lock cannot silently diverge. Pin package versions here (`pkg==1.2.3`, `pkg@1.2.3`). |
