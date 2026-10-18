@@ -34,6 +34,14 @@ All notable changes are recorded here. The format follows
 - A fresh `lock` of a server that speaks both eras now records it as 2026-07-28.
   Existing entries keep their era.
 
+### Fixed
+- The proxy no longer waits forever when a server does not answer the `initialize` or
+  `server/discover` that mcpsum sends itself (for a 2026-07-28 client, or in front of a
+  2026-07-28 server). Only verification had a timeout, so such a session stayed in its
+  opening phase and every queued call went unanswered. The opening now gets the same
+  30 s budget (`verify_timeout_ms`): the server is quarantined (audited), queued calls
+  get `-32002`, and a late answer is dropped instead of restarting verification.
+
 ## [0.2.0] - 2026-10-13
 
 ### Added
