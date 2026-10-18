@@ -416,6 +416,9 @@ Several proxies may write the same log at once (VS Code runs MCP servers in two
 processes): every append takes an exclusive cross-process lock, re-reads the chain
 head and checks its hash, then writes one complete line, so the log stays a single
 chain. A head that fails its hash check is never extended; the proxy fails closed.
+When the proxy starts, a log that fails verification or that it could not extend
+(not valid UTF-8, no final newline, a blank or oversized last line) is moved aside
+unchanged as `<name>.corrupt-<ms>.jsonl` and a new chain starts.
 
 Argument **values** are never logged. Only their canonical digest
 (RFC 8785 JSON, SHA-256) is recorded.

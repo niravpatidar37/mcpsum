@@ -395,8 +395,16 @@ fn cmd_show(lock: &Path, name: Option<&str>) -> Result<u8> {
 }
 
 fn cmd_audit_verify(path: &Path) -> Result<u8> {
-    let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    match verify_chain(&text) {
+    let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    // Entries are UTF-8 JSON: other bytes were edited in or torn mid-write.
+    let text = match std::str::from_utf8(&bytes) {
+        Ok(text) => text,
+        Err(e) => {
+            println!("TAMPERED: not valid UTF-8 at byte {}", e.valid_up_to());
+            return Ok(EXIT_DRIFT);
+        }
+    };
+    match verify_chain(text) {
         Ok((n, last)) => {
             println!("ok: {n} entries, head {last}");
             Ok(EXIT_OK)
@@ -500,6 +508,35 @@ fn cmd_sandbox_exec(spec: &str, command: &[String]) -> Result<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn audit_verify_reports_invalid_utf8_as_tampered() {
+        // README exit codes: 1 = audit chain broken (`audit-verify`), not 3.
+        let d = std::env::temp_dir().join(format!("mcpsum-main-av-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let p = d.join("s.jsonl");
+        std::fs::write(&p, b"\xff\n").unwrap();
+        let garbage = cmd_audit_verify(&p).map_err(|e| format!("{e:#}"));
+        // An entry whose U+FFFD became a raw invalid byte: a lossy decode
+        // would still verify, so only a strict decode reports it.
+        let mut buf = Vec::new();
+        let ev = mcpsum::monitor::AuditEvent {
+            dir: mcpsum::monitor::Dir::ClientToServer,
+            method: None,
+            subject: None,
+            decision: mcpsum::monitor::Decision::Allow,
+            reason: "\u{FFFD}".into(),
+            args_digest: None,
+        };
+        mcpsum::audit::AuditLog::new(&mut buf, "s").append(&ev, 1).unwrap();
+        let text = String::from_utf8(buf).unwrap().replace('\u{FFFD}', "\u{1}");
+        let bytes: Vec<u8> = text.bytes().map(|b| if b == 1 { 0xFF } else { b }).collect();
+        std::fs::write(&p, bytes).unwrap();
+        let swapped = cmd_audit_verify(&p).map_err(|e| format!("{e:#}"));
+        let _ = std::fs::remove_dir_all(&d);
+        assert_eq!(garbage, Ok(EXIT_DRIFT));
+        assert_eq!(swapped, Ok(EXIT_DRIFT));
+    }
 
     #[test]
     fn show_unknown_name_is_an_error() {

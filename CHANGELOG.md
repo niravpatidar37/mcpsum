@@ -15,6 +15,14 @@ All notable changes are recorded here. The format follows
   `additionalProperties`/`unevaluatedProperties`. Affects 0.2.0 and earlier
   (GHSA-h84p-xpp4-jghw).
 
+### Fixed
+- Audit log: the proxy no longer keeps a log it cannot extend. A log that is not valid
+  UTF-8 (a write torn inside a multi-byte character) stopped every proxy start, and a
+  log missing its final newline, ending in a blank line or with a last entry over 1 MiB
+  was kept but refused by every append. All of them are now moved aside unchanged as
+  `<name>.corrupt-<ms>.jsonl` and a new chain starts. `audit-verify` reports a log that
+  is not valid UTF-8 as `TAMPERED` (exit 1) instead of an I/O error (exit 3).
+
 ### Added
 - `lock` and `verify` for servers that speak only MCP 2026-07-28 (#21). `lock` now
   detects a server's era the way the spec asks a dual-era client to on stdio:
