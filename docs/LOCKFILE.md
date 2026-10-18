@@ -59,6 +59,9 @@ use a lockfile whose digests do not match its contents.
 | `policy` | Optional, written by **you** (never by the server): taint labels ([I6](#policy-optional-i6)) and a sandbox ([I5](#sandbox-optional-i5)). Not covered by `digests`, and kept when the server is re-locked. |
 | `digests` | SHA-256 over the RFC 8785 canonical JSON of each item, plus one over the whole surface. mcpsum recomputes them on load and refuses a lockfile that does not match. |
 
+A server entry with any other key is refused, so a misspelled `policy` cannot
+silently turn taint tracking and the sandbox off.
+
 ## Policy (optional, I6)
 
 Add a `policy` section to a server entry to turn on taint tracking for it:
@@ -95,7 +98,7 @@ Rules:
 
 - Every name must be a locked tool (or one of the two wildcards). A misspelled
   name is an error, so a typo cannot silently leave a tool unprotected. Unknown
-  keys are errors too.
+  keys are errors too, in `policy` and in the server entry itself.
 - Tool annotations (`readOnlyHint`, `destructiveHint`, `openWorldHint`) are
   hints written by the server. Use them to help you decide, but mcpsum never
   applies them on its own.

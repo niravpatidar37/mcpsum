@@ -362,6 +362,7 @@ server's annotations for you to review.
 `i6_late_response_to_a_cancelled_source_call_is_dropped_and_does_not_taint`,
 `i6_progress_text_from_a_source_taints_before_it_is_delivered`,
 `i6_policy_naming_an_unlocked_tool_is_rejected`,
+`i6_misspelled_policy_key_on_a_server_entry_is_rejected`,
 `i6_marker_is_shared_by_every_store_of_a_session_and_cleared_only_by_reset`,
 `i6_session_ids_cannot_escape_the_state_directory` and the other `i6_*` unit tests.
 e2e: `test_I6_injected_result_cannot_trigger_a_sink_when_the_client_cannot_prompt`,

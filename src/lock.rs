@@ -223,6 +223,26 @@ pub struct TaintPolicy {
     pub sinks: BTreeSet<String>,
 }
 
+/// Every key a server entry may have: the fields of `ServerLock` and of the
+/// flattened `Surface`, as serialized. `deny_unknown_fields` does not work
+/// with `flatten`, so `LockFile::parse` checks against this list; a test
+/// keeps it equal to what `to_pretty` writes.
+pub const SERVER_ENTRY_KEYS: &[&str] = &[
+    "command",
+    "envPassthrough",
+    "protocolVersion",
+    "supportedVersions",
+    "serverInfo",
+    "instructions",
+    "capabilities",
+    "tools",
+    "prompts",
+    "resources",
+    "resourceTemplates",
+    "digests",
+    "policy",
+];
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServerLock {
@@ -530,6 +550,26 @@ impl ServerLock {
     }
 }
 
+/// A server entry with a key mcpsum never writes is an error: a misspelled
+/// `policy` would otherwise turn taint tracking and the sandbox off silently.
+fn check_server_entry_keys(text: &str) -> Result<()> {
+    let raw: Value = serde_json::from_str(text).context("mcp.lock is not valid lockfile JSON")?;
+    let Some(servers) = raw.get("servers").and_then(Value::as_object) else {
+        return Ok(()); // the typed parse reports the missing or malformed field
+    };
+    for (name, entry) in servers {
+        let Some(entry) = entry.as_object() else { continue };
+        if let Some(key) = entry.keys().find(|k| !SERVER_ENTRY_KEYS.contains(&k.as_str())) {
+            bail!(
+                "server `{}`: unknown key `{}` (misspelled?)",
+                name.escape_debug(),
+                key.escape_debug()
+            );
+        }
+    }
+    Ok(())
+}
+
 impl LockFile {
     pub fn new() -> Self {
         Self {
@@ -540,6 +580,7 @@ impl LockFile {
     }
 
     pub fn parse(text: &str) -> Result<Self> {
+        check_server_entry_keys(text)?;
         let lf: LockFile = serde_json::from_str(text).context("mcp.lock is not valid lockfile JSON")?;
         if !(1..=LOCKFILE_VERSION).contains(&lf.lockfile_version) {
             bail!(
@@ -797,6 +838,67 @@ pub(crate) mod tests {
         ] {
             assert!(LockFile::parse(&with_policy(&sample_lockfile_text(), policy)).is_err());
         }
+    }
+
+    /// A typo in the `policy` key itself would leave the entry without taint
+    /// tracking (I6) and without a sandbox (I5), silently: `Surface` is
+    /// flattened into the entry, so serde would just ignore the key.
+    #[test]
+    fn i6_misspelled_policy_key_on_a_server_entry_is_rejected() {
+        let policy = json!({
+            "taint": {"sources": ["add"], "sinks": ["sub"]},
+            "sandbox": {"filesystem": {"read": [], "write": []}, "network": {"allow": []}}
+        });
+        for typo in ["polcy", "Policy", "policies", "sandbox", "taint"] {
+            let mut v: Value = serde_json::from_str(&sample_lockfile_text()).unwrap();
+            v["servers"]["demo"][typo] = policy.clone();
+            let err = match LockFile::parse(&serde_json::to_string(&v).unwrap()) {
+                Ok(lf) => panic!("`{typo}` was accepted; policy is {:?}", lf.servers["demo"].policy),
+                Err(e) => format!("{e:#}"),
+            };
+            assert!(err.contains("`demo`") && err.contains(&format!("`{typo}`")), "{err}");
+        }
+        // The same entry under the right key parses.
+        LockFile::parse(&with_policy(&sample_lockfile_text(), policy)).unwrap();
+    }
+
+    /// The accepted keys are exactly the ones mcpsum writes for a fully
+    /// populated entry, so adding a field without listing it (or the reverse)
+    /// fails here instead of rejecting valid lockfiles or accepting typos.
+    #[test]
+    fn server_entry_keys_are_exactly_what_mcpsum_writes() {
+        let mut s = modern_surface();
+        s.prompts = vec![json!({"name": "p"})];
+        s.resources = vec![json!({"uri": "file:///a", "name": "a"})];
+        s.resource_templates = vec![json!({"uriTemplate": "file:///{x}", "name": "x"})];
+        let mut entry = ServerLock::from_surface(vec!["m".into()], vec!["HOME".into()], s).unwrap();
+        entry.policy = Some(ServerPolicy {
+            taint: Some(TaintPolicy::default()),
+            sandbox: Some(SandboxPolicy::default()),
+        });
+        let mut lf = LockFile::new();
+        lf.servers.insert("m".into(), entry);
+        let v: Value = serde_json::from_str(&lf.to_pretty().unwrap()).unwrap();
+        let written: BTreeSet<&str> = v["servers"]["m"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(written, SERVER_ENTRY_KEYS.iter().copied().collect::<BTreeSet<_>>());
+        assert_eq!(LockFile::parse(&lf.to_pretty().unwrap()).unwrap().servers, lf.servers);
+    }
+
+    /// Lockfiles written by older mcpsum (fewer keys)
+    /// still parse: only keys mcpsum never writes are rejected.
+    #[test]
+    fn server_entry_with_only_the_required_keys_still_parses() {
+        let mut v: Value = serde_json::from_str(&sample_lockfile_text()).unwrap();
+        let e = v["servers"]["demo"].as_object_mut().unwrap();
+        for k in ["envPassthrough", "prompts", "resources", "resourceTemplates"] {
+            e.remove(k).unwrap();
+        }
+        LockFile::parse(&serde_json::to_string(&v).unwrap()).unwrap();
     }
     #[test]
     fn i6_relock_keeps_the_policy_and_reports_labels_for_vanished_tools() {

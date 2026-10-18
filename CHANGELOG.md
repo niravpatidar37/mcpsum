@@ -14,6 +14,9 @@ All notable changes are recorded here. The format follows
   nested objects typed `["object", "null"]` and in object schemas under
   `additionalProperties`/`unevaluatedProperties`. Affects 0.2.0 and earlier
   (GHSA-h84p-xpp4-jghw).
+- I5/I6: a server entry in `mcp.lock` with a key mcpsum does not know is now refused.
+  Before, a misspelled `policy` key (`polcy`, `Policy`) was ignored, so the entry
+  loaded with taint tracking and its sandbox silently off. Affects 0.2.0 and earlier.
 - I8: one client request could block a server's audit log for good. A `tools/call` or
   `prompts/get` for an unknown name (lines up to 4 MiB are accepted) was logged with
   the name untruncated; every later append, and every proxy start for that server, then
