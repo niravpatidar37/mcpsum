@@ -409,6 +409,8 @@ Several proxies may write the same log at once (VS Code runs MCP servers in two
 processes): every append takes an exclusive cross-process lock, re-reads the chain
 head and checks its hash, then writes one complete line, so the log stays a single
 chain. A head that fails its hash check is never extended; the proxy fails closed.
+Peer text in an entry is truncated (method 100, subject 200, reason 1000 characters),
+and the log refuses to write an entry over 1 MiB, the most it reads back as a head.
 
 Argument **values** are never logged. Only their canonical digest
 (RFC 8785 JSON, SHA-256) is recorded.
@@ -418,7 +420,8 @@ can truncate the log, or rewrite all of it. To catch that, anchor the head
 hash somewhere they cannot write.
 
 **Tests.** `i8_allowed_calls_are_audited_with_args_digest_not_args`,
-`i8_denied_argument_values_never_appear_in_audit_or_error`, `audit::tests::*`,
+`i8_denied_argument_values_never_appear_in_audit_or_error`,
+`i8_audit_entries_stay_bounded_whatever_the_peer_sends`, `audit::tests::*`,
 `concurrent_writers_keep_one_valid_chain` (8 writers × 50 appends).
 e2e: `test_I8_audit_log_verifies_and_detects_tampering`,
 `test_I8_two_proxies_for_one_server_keep_one_valid_chain`.

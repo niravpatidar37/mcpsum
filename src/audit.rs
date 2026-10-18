@@ -148,13 +148,20 @@ impl AuditFile {
             Some(line) => head_of(&line).context("audit log head is invalid; refusing to extend it")?,
         };
         let (line, _) = build_entry(&self.server, seq + 1, &prev, ev, ts_ms);
+        let mut bytes = line.into_bytes();
+        bytes.push(b'\n');
+        // Never write a head that the next append could not read back.
+        if bytes.len() as u64 > MAX_TAIL {
+            bail!(
+                "audit entry of {} bytes is larger than {MAX_TAIL}; refusing to write it",
+                bytes.len()
+            );
+        }
         let mut f = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&self.path)
             .with_context(|| format!("opening {}", self.path.display()))?;
-        let mut bytes = line.into_bytes();
-        bytes.push(b'\n');
         f.write_all(&bytes)?; // one write of one complete line, under the lock
         f.flush()?;
         Ok(())
@@ -325,5 +332,70 @@ mod tests {
             log.append(&ev("four"), 4).unwrap();
         }
         assert_eq!(verify_chain(&String::from_utf8(buf).unwrap()).unwrap().0, 4);
+    }
+
+    fn scratch_log(tag: &str) -> (PathBuf, PathBuf) {
+        let d = std::env::temp_dir().join(format!("mcpsum-audit-size-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let path = d.join("s.jsonl");
+        (d, path)
+    }
+
+    /// An event whose entry line, newline included, is `bytes` long.
+    fn event_of_size(bytes: usize, seq: u64, prev: &str) -> AuditEvent {
+        let mut e = ev("sized");
+        e.subject = Some(String::new());
+        let base = build_entry("demo", seq, prev, &e, 1).0.len() + 1;
+        e.subject = Some("a".repeat(bytes - base));
+        assert_eq!(build_entry("demo", seq, prev, &e, 1).0.len() + 1, bytes);
+        e
+    }
+
+    #[test]
+    fn append_refuses_an_entry_it_could_not_read_back() {
+        let (d, path) = scratch_log("over");
+        let mut a = AuditFile::open(&path, "demo").unwrap();
+        a.append(&ev("one"), 1).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let (_, prev) = verify_chain(std::str::from_utf8(&before).unwrap()).unwrap();
+        let refused = a.append(&event_of_size(MAX_TAIL as usize + 1, 2, &prev), 1);
+        let after = std::fs::read(&path).unwrap();
+        let next = a.append(&ev("two"), 3);
+        let text = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_dir_all(&d);
+        assert!(refused.is_err(), "an entry over MAX_TAIL must be refused");
+        assert_eq!(after, before, "a refused entry writes nothing");
+        next.unwrap();
+        assert_eq!(verify_chain(&text).unwrap().0, 2);
+    }
+
+    #[test]
+    fn append_extends_an_entry_of_exactly_max_tail_bytes() {
+        let (d, path) = scratch_log("exact");
+        let mut a = AuditFile::open(&path, "demo").unwrap();
+        a.append(&ev("one"), 1).unwrap();
+        let (_, prev) = verify_chain(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let wrote = a.append(&event_of_size(MAX_TAIL as usize, 2, &prev), 1);
+        let next = a.append(&ev("three"), 3);
+        let text = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_dir_all(&d);
+        wrote.unwrap();
+        next.unwrap();
+        assert_eq!(verify_chain(&text).unwrap().0, 3);
+    }
+
+    #[test]
+    fn append_can_extend_every_entry_it_wrote() {
+        // Before the bound, a 2 MiB entry was written and then refused as a
+        // head by every later append: one entry blocked the log for good.
+        let (d, path) = scratch_log("big");
+        let mut a = AuditFile::open(&path, "demo").unwrap();
+        let mut big = ev("big");
+        big.subject = Some("a".repeat(2 * MAX_TAIL as usize));
+        let _ = a.append(&big, 1);
+        let next = a.append(&ev("next"), 2);
+        let _ = std::fs::remove_dir_all(&d);
+        next.unwrap_or_else(|e| panic!("append after an oversized entry failed: {e:#}"));
     }
 }
