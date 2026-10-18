@@ -293,12 +293,20 @@ fn audit(
 }
 
 /// Make object schemas reject undeclared properties unless the locked schema
-/// explicitly allows them. Combinator schemas are left untouched because
-/// `additionalProperties: false` inside allOf/anyOf/oneOf changes their meaning.
-/// `not` and `if` are left untouched too: a stricter subschema there matches
-/// less often, which would *widen* what the schema accepts. The strict form is
-/// only ever enforced together with the locked schema as written (see
-/// [`ArgsValidator`]), so a rewrite here can add rules but never remove one.
+/// explicitly allows them. Subschemas that apply to the *same* instance as
+/// their parent are left untouched: `additionalProperties: false` inside
+/// allOf/anyOf/oneOf, `then`/`else` or `dependentSchemas` would reject
+/// properties the parent declares. `not` and `if` are left untouched too: a
+/// stricter subschema there matches less often, which would *widen* what the
+/// schema accepts. The strict form is only ever enforced together with the
+/// locked schema as written (see [`ArgsValidator`]), so a rewrite here can add
+/// rules but never remove one.
+///
+/// `$defs`/`definitions` entries are still made strict (fail closed). An entry
+/// referenced from `properties` describes a separate instance, where strict is
+/// right; one referenced from `allOf`, or by a `$ref` with property-declaring
+/// siblings, describes the same instance, so properties declared beside it are
+/// rejected too (valid calls are denied; nothing undeclared is let through).
 pub fn strictify(schema: &Value) -> Value {
     let Value::Object(m) = schema else {
         return schema.clone();
@@ -306,13 +314,13 @@ pub fn strictify(schema: &Value) -> Value {
     let mut out = Map::new();
     for (k, v) in m {
         let nv = match k.as_str() {
-            "properties" | "patternProperties" | "$defs" | "definitions" | "dependentSchemas" => match v {
+            "properties" | "patternProperties" | "$defs" | "definitions" => match v {
                 Value::Object(props) => {
                     Value::Object(props.iter().map(|(pk, pv)| (pk.clone(), strictify(pv))).collect())
                 }
                 other => other.clone(),
             },
-            "items" | "additionalItems" | "contains" | "then" | "else" | "unevaluatedItems" => match v {
+            "items" | "additionalItems" | "contains" | "unevaluatedItems" => match v {
                 Value::Array(a) => Value::Array(a.iter().map(strictify).collect()),
                 other => strictify(other),
             },
@@ -2410,6 +2418,78 @@ mod tests {
         let strict = strictify(&schema);
         assert_eq!(strict["not"], sub);
         assert_eq!(strict["if"], sub);
+    }
+
+    #[test]
+    fn i2_same_instance_applicators_accept_declared_and_deny_undeclared() {
+        // `dependentSchemas` and `then`/`else` describe the same object as their
+        // parent: making them strict rejected properties the parent declares.
+        let dependent = json!({"type": "object",
+            "properties": {"card": {"type": "string"}, "billing": {"type": "string"}},
+            "dependentSchemas": {"card": {"properties": {"billing": {"type": "string"}}, "required": ["billing"]}}});
+        let conditional = json!({"type": "object",
+            "properties": {"mode": {"type": "string"}, "path": {"type": "string"}},
+            "if": {"properties": {"mode": {"const": "write"}}, "required": ["mode"]},
+            "then": {"properties": {"path": {"pattern": "^/tmp/"}}, "required": ["path"]},
+            "else": {"properties": {"path": {"pattern": "^/"}}}});
+        for (schema, valid, rejected) in [
+            (
+                dependent.clone(),
+                json!({"card": "c", "billing": "b"}),
+                json!({"card": "c"}),
+            ),
+            (
+                conditional.clone(),
+                json!({"mode": "write", "path": "/tmp/x"}),
+                json!({"mode": "write", "path": "/etc/x"}),
+            ),
+            (
+                conditional.clone(),
+                json!({"mode": "read", "path": "/etc/x"}),
+                json!({"mode": "read", "path": "etc"}),
+            ),
+        ] {
+            let (mut m, s) = mon_with_tool(schema);
+            handshake(&mut m, &s);
+            assert_eq!(
+                to_server(&call(&mut m, 3, "t", valid.clone())).len(),
+                1,
+                "denied valid {valid}"
+            );
+            assert!(
+                to_server(&call(&mut m, 4, "t", rejected.clone())).is_empty(),
+                "forwarded {rejected}"
+            );
+            let mut extra = valid.clone();
+            extra["sidenote"] = json!("TOPSECRETVALUE");
+            assert!(
+                to_server(&call(&mut m, 5, "t", extra)).is_empty(),
+                "I2: undeclared property forwarded"
+            );
+        }
+        let strict = strictify(&conditional);
+        assert_eq!(
+            (&strict["then"], &strict["else"]),
+            (&conditional["then"], &conditional["else"])
+        );
+        assert_eq!(strictify(&dependent)["dependentSchemas"], dependent["dependentSchemas"]);
+    }
+
+    #[test]
+    fn i2_defs_used_from_allof_stay_strict_and_fail_closed() {
+        // A `$defs` entry may describe a separate instance (from `properties`)
+        // or the same one (from `allOf`/`$ref`); strictify keeps it strict.
+        // Here that alone rejects undeclared top-level properties. Residual,
+        // documented on `strictify`: `extra`, declared by the other `allOf`
+        // member, is rejected too.
+        let schema = json!({"type": "object",
+            "allOf": [{"$ref": "#/$defs/base"}, {"properties": {"extra": {"type": "string"}}}],
+            "$defs": {"base": {"type": "object", "properties": {"a": {"type": "number"}}}}});
+        let (mut m, s) = mon_with_tool(schema);
+        handshake(&mut m, &s);
+        assert_eq!(to_server(&call(&mut m, 3, "t", json!({"a": 1}))).len(), 1);
+        assert!(to_server(&call(&mut m, 4, "t", json!({"a": 1, "sidenote": "TOPSECRETVALUE"}))).is_empty());
+        assert!(to_server(&call(&mut m, 5, "t", json!({"a": 1, "extra": "x"}))).is_empty());
     }
 
     #[test]

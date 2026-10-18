@@ -36,6 +36,12 @@ All notable changes are recorded here. The format follows
   Existing entries keep their era.
 
 ### Fixed
+- I2: valid tool calls are no longer denied when the locked `inputSchema` uses
+  `dependentSchemas` or `if`/`then`/`else`. Strict mode added
+  `additionalProperties: false` inside those subschemas, which describe the same object
+  as their parent, so they rejected properties the parent declares. Undeclared
+  properties are still rejected at the parent. `$defs` entries used from `allOf` stay
+  strict (fail closed); see `strictify`.
 - I8: client messages the proxy rejects before any routing (a `jsonrpc` other than
   `"2.0"`, an invalid id, neither `method` nor `id`, `initialize` without
   `protocolVersion`, a second `initialize`) are now audited. They got an error but no
