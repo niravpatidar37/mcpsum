@@ -493,6 +493,24 @@ mod tests {
     }
 
     #[test]
+    fn audit_with_invalid_utf8_is_moved_aside_not_fatal() {
+        // open_audit's contract: a log that fails verification is moved aside
+        // and a new chain starts; it must not stop the proxy from starting.
+        let dir = std::env::temp_dir().join(format!("mcpsum-audit-utf8-{}-{}", std::process::id(), unix_ms()));
+        let path = dir.join("s.jsonl");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&path, b"{\"x\":1}\n\xff\n").unwrap();
+        let opened = open_audit(&path, "s").map(|mut a| a.append(&ev(), 1));
+        let aside = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| e.file_name().to_string_lossy().contains("corrupt-"));
+        let _ = std::fs::remove_dir_all(&dir);
+        opened.unwrap_or_else(|e| panic!("proxy cannot start: {e:#}")).unwrap();
+        assert!(aside, "corrupt log must be moved aside");
+    }
+
+    #[test]
     fn audit_resumes_valid_chain_and_quarantines_tampered_one() {
         let dir = std::env::temp_dir().join(format!("mcpsum-audit-test-{}", unix_ms()));
         let path = dir.join("s.jsonl");
