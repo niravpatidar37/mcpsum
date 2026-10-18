@@ -33,7 +33,9 @@ nightly.
 **Statement.** After approval, no definition text written by the server reaches
 the client. `tools/list`, `prompts/list`, `resources/list`,
 `resources/templates/list`, `serverInfo`, `instructions` and the advertised
-capabilities are answered from `mcp.lock`. For a 2026-07-28 client (no
+capabilities are answered from `mcp.lock`. The negotiated `protocolVersion` is
+mcpsum's own copy of a revision it knows (or the locked string); a server
+that answers `initialize` with any other value is quarantined. For a 2026-07-28 client (no
 `initialize`, version in each request's `_meta`), so is `server/discover`,
 and every result carries the locked `serverInfo`; the server's own
 `server/discover` is never consulted. The live server is asked for its
@@ -64,6 +66,7 @@ monitor never forwards one.
 `i1_all_list_kinds_served_from_lock`,
 `i1_initialize_returns_locked_instructions_and_server_info_even_if_server_lies`,
 `i1_initialize_error_text_from_server_is_not_forwarded` (found by the property test),
+`i1_initialize_protocol_version_is_never_server_text`,
 `i1_tool_drift_during_verification_quarantines_and_poison_never_reaches_client`,
 `i1_list_changed_is_not_forwarded_and_triggers_reverification`,
 `i1_verification_follows_pagination`, `i1_verification_timeout_quarantines`,

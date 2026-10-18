@@ -53,7 +53,7 @@ use a lockfile whose digests do not match its contents.
 | `servers.<name>` | One entry per server. `<name>` is what you pass to `--name` and use in your client config. |
 | `command` | The exact argv the proxy runs. **The proxy never takes a command from the client config**, so the config and the lock cannot silently diverge. Pin package versions here (`pkg==1.2.3`, `pkg@1.2.3`). |
 | `envPassthrough` | **Names** of environment variables passed to the server. Values are never stored. Everything else is withheld. |
-| `protocolVersion`, `serverInfo`, `capabilities`, `instructions` | What the server reported at lock time. Served to the client from here. Changes count as *informational* drift, except `instructions`, which is definitional. |
+| `protocolVersion`, `serverInfo`, `capabilities`, `instructions` | What the server reported at lock time. Served to the client from here, except `protocolVersion` for a legacy server: the client gets the revision the server negotiates in that session, as mcpsum's own copy of a revision it knows (or the locked string), and any other value quarantines. Changes count as *informational* drift, except `instructions`, which is definitional. |
 | `supportedVersions` | Only for a server locked over 2026-07-28 `server/discover` (version 2): the versions it listed. `protocolVersion` is then the one mcpsum picked and sends in every request's `_meta`. See [Protocol era](#protocol-era). |
 | `tools`, `prompts`, `resources`, `resourceTemplates` | The full definitions as returned by the server (all pages), keyed by `name`, `name`, `uri` and `uriTemplate`. Served to the client from here. Capped at 1,000 items per kind. |
 | `policy` | Optional, written by **you** (never by the server): taint labels ([I6](#policy-optional-i6)) and a sandbox ([I5](#sandbox-optional-i5)). Not covered by `digests`, and kept when the server is re-locked. |
@@ -161,7 +161,7 @@ proxy talks to each server only in its locked era.
 | Class | What changed | `verify` | `proxy` |
 |---|---|---|---|
 | Definitional | any tool, prompt, resource or template added, removed or changed; `instructions`; the protocol era (`initialize` vs. `server/discover`) | exit 1 | quarantine (`-32002` for every later request) |
-| Informational | `serverInfo`, `capabilities`, `protocolVersion`, `supportedVersions` | reported, exit 0 (exit 1 with `--strict`) | allowed; the client still sees the locked values |
+| Informational | `serverInfo`, `capabilities`, `protocolVersion`, `supportedVersions` | reported, exit 0 (exit 1 with `--strict`) | allowed; the client still sees the locked values (`protocolVersion`: see [Fields](#fields)) |
 
 A 2026-07-28 server that no longer lists the locked `protocolVersion` cannot
 be spoken to as locked: `verify` and `lock` fail and the proxy quarantines it.
