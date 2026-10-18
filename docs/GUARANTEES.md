@@ -92,9 +92,11 @@ Property: invariant I1 in `tests/properties.rs`, also with a 2026-07-28 server.
 ## I2 — Calls are limited to locked items and strict locked schemas
 
 **Statement.** `tools/call` is forwarded only for a locked tool, with
-arguments that validate against the **locked** `inputSchema` under strict
-rules. Any property the schema does not declare is rejected, unless the schema
-explicitly sets `additionalProperties`. `prompts/get` is checked against the
+arguments that validate against the **locked** `inputSchema` as written *and*
+under strict rules. Any property the schema does not declare is rejected, unless
+the schema explicitly sets `additionalProperties`. Nested object schemas inside
+`allOf`/`anyOf`/`oneOf` are not made strict (only the locked schema applies
+there). `prompts/get` is checked against the
 locked prompt's argument names. `resources/read` is limited to locked URIs and
 locked URI templates. Schemas with remote `$ref`s fail closed.
 
@@ -108,6 +110,10 @@ with `~/.ssh/id_rsa`). The call is refused before it reaches the server.
 **Tests.** `i2_unapproved_tool_is_denied`, `i2_hidden_extra_argument_is_denied`,
 `i2_extra_argument_denied_on_schema_without_properties`,
 `i2_wrong_type_and_missing_required_are_denied`, `i2_remote_ref_schema_fails_closed`,
+`i2_negated_and_conditional_rules_of_the_locked_schema_are_enforced`,
+`i2_undeclared_property_is_denied_in_nullable_and_map_value_objects`,
+`i2_locked_schema_is_enforced_where_strict_mode_would_widen_it`,
+`i2_strictify_leaves_not_and_if_untouched`,
 `i2_prompt_get_checks_name_and_argument_names`,
 `i2_resource_read_limited_to_locked_uris_and_templates`,
 `i2_valid_call_is_forwarded_with_rewritten_id_and_response_mapped_back`.

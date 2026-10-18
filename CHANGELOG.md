@@ -6,6 +6,15 @@ All notable changes are recorded here. The format follows
 
 ## [Unreleased]
 
+### Security
+- I2: tool arguments are now checked against the locked `inputSchema` as written as
+  well as its strict form. Before, only the strict rewrite was checked, and it could
+  drop locked rules (`not`, `if`/`then`, `contains` with `maxContains`), so arguments
+  the lock forbids reached the server. Undeclared properties are now also refused in
+  nested objects typed `["object", "null"]` and in object schemas under
+  `additionalProperties`/`unevaluatedProperties`. Affects 0.2.0 and earlier
+  (GHSA-h84p-xpp4-jghw).
+
 ### Added
 - `lock` and `verify` for servers that speak only MCP 2026-07-28 (#21). `lock` now
   detects a server's era the way the spec asks a dual-era client to on stdio:
