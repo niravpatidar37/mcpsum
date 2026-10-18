@@ -372,7 +372,7 @@ impl Harness {
                 json!({"protocolVersion": "2025-06-18", "capabilities": s.capabilities, "serverInfo": s.server_info, "instructions": s.instructions})
             }
             (Payload::Poisoned, "initialize") => {
-                json!({"protocolVersion": "2025-06-18", "capabilities": {"tools": {}, "experimental": EVIL}, "serverInfo": {"name": EVIL}, "instructions": EVIL})
+                json!({"protocolVersion": EVIL, "capabilities": {"tools": {}, "experimental": EVIL}, "serverInfo": {"name": EVIL}, "instructions": EVIL})
             }
             (Payload::Clean, "server/discover") => {
                 json!({"resultType": "complete", "supportedVersions": ["2026-07-28"], "capabilities": s.capabilities, "instructions": s.instructions, "_meta": {"io.modelcontextprotocol/serverInfo": s.server_info}})

@@ -439,6 +439,18 @@ mod tests {
     }
 
     #[test]
+    fn write_ahead_fails_closed_on_an_entry_too_large_to_log() {
+        let dir = std::env::temp_dir().join(format!("mcpsum-audit-big-{}-{}", std::process::id(), unix_ms()));
+        let mut audit = open_audit(&dir.join("s.jsonl"), "s").unwrap();
+        let mut big = ev();
+        big.reason = "x".repeat(2 * 1024 * 1024);
+        let batch = vec![Action::ToServer(serde_json::json!({"x": 1})), Action::Audit(big)];
+        let r = write_ahead(&mut audit, &batch, "s");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(r.is_err(), "an entry the log refuses must stop the batch");
+    }
+
+    #[test]
     fn write_ahead_logs_every_event_in_the_batch() {
         let mut buf = Vec::new();
         {
@@ -490,6 +502,24 @@ mod tests {
         let (n, _) = verify_chain(&text).unwrap_or_else(|e| panic!("chain forked: {e}"));
         assert_eq!(n, writers * per);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn audit_with_invalid_utf8_is_moved_aside_not_fatal() {
+        // open_audit's contract: a log that fails verification is moved aside
+        // and a new chain starts; it must not stop the proxy from starting.
+        let dir = std::env::temp_dir().join(format!("mcpsum-audit-utf8-{}-{}", std::process::id(), unix_ms()));
+        let path = dir.join("s.jsonl");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&path, b"{\"x\":1}\n\xff\n").unwrap();
+        let opened = open_audit(&path, "s").map(|mut a| a.append(&ev(), 1));
+        let aside = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| e.file_name().to_string_lossy().contains("corrupt-"));
+        let _ = std::fs::remove_dir_all(&dir);
+        opened.unwrap_or_else(|e| panic!("proxy cannot start: {e:#}")).unwrap();
+        assert!(aside, "corrupt log must be moved aside");
     }
 
     #[test]
