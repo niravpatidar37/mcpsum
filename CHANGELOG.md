@@ -38,6 +38,12 @@ All notable changes are recorded here. The format follows
 - The per-line size limit (4 MiB) no longer counts the CR of a CRLF line ending, so a
   message of exactly the limit is accepted with CRLF as it is with LF. Memory stays
   bounded to one line, now checked by a test that counts allocations.
+- `show --name <name>` now fails (exit 3, "server `<name>` is not in the lockfile") when
+  the name is not locked, like `verify`, `suggest-policy` and `proxy`. Before, a typo
+  printed nothing and exited 0, which looked like an empty review.
+- Command-line usage errors (unknown flag, missing argument, no subcommand) now exit 3
+  as documented, not clap's 2, which mcpsum uses for `lock --deny-findings` findings.
+  Help and version output still exit 0, and messages are unchanged.
 
 ## [0.2.0] - 2026-10-13
 
