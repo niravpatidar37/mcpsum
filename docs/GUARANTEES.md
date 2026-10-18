@@ -352,6 +352,7 @@ server's annotations for you to review.
 `i6_approval_prompt_names_tool_and_source_and_escapes_the_arguments`,
 `i6_unanswered_approval_times_out_denies_and_withdraws_the_prompt`,
 `i6_quarantine_denies_held_calls`,
+`i6_late_response_to_a_cancelled_source_call_is_dropped_and_does_not_taint`,
 `i6_progress_text_from_a_source_taints_before_it_is_delivered`,
 `i6_policy_naming_an_unlocked_tool_is_rejected`,
 `i6_marker_is_shared_by_every_store_of_a_session_and_cleared_only_by_reset`,
@@ -378,6 +379,10 @@ recorded before delivery).
 - duplicate in-flight client ids
 - responses that do not match an open request, or that answer one twice
   (spoofed ids)
+- a response to a request the client cancelled (`notifications/cancelled`). A
+  cancelled call frees its slot, id and progress token at once; a call still
+  queued for verification is dropped and never sent. The client can cancel only
+  its own calls, never `initialize` or mcpsum's own requests
 
 The client never sees server-side request ids, because mcpsum rewrites them.
 If the audit log cannot be written, the proxy stops: audit entries are written
@@ -389,6 +394,9 @@ quarantine it and exit, rather than hang.
 `i7_duplicate_pending_client_id_rejected`,
 `i7_spoofed_and_duplicate_responses_are_dropped`,
 `i7_client_cancel_is_translated_to_proxy_id`,
+`i7_cancelled_call_frees_its_slot_and_id_and_its_late_response_is_dropped`,
+`i7_cancelled_queued_call_is_never_forwarded`,
+`i7_client_cannot_cancel_mcpsum_own_requests`,
 `i7_redos_patterns_in_locked_schemas_run_in_linear_time` (catastrophic regexes in locked
 schemas run in linear time or fail closed at compile time),
 `write_ahead_fails_closed_when_audit_cannot_be_written` (`src/proxy.rs`).

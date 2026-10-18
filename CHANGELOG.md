@@ -34,6 +34,15 @@ All notable changes are recorded here. The format follows
 - A fresh `lock` of a server that speaks both eras now records it as 2026-07-28.
   Existing entries keep their era.
 
+### Fixed
+- Client cancellation (`notifications/cancelled`) now follows the MCP spec: a cancelled
+  call frees its pending slot, request id and progress token at once, and a late
+  response from the server is dropped (audited) instead of reaching the client. Before,
+  every cancelled call kept its slot until the server answered, so after `max_pending`
+  (256) unanswered cancels each new call was refused with `-32001`, and a cancelled id
+  could not be reused. A call cancelled while still queued for drift verification is now
+  dropped (audited) and never sent; before, it still ran on the server after verification.
+
 ## [0.2.0] - 2026-10-13
 
 ### Added
