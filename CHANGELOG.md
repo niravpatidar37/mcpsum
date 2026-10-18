@@ -35,6 +35,9 @@ All notable changes are recorded here. The format follows
   Existing entries keep their era.
 
 ### Fixed
+- The per-line size limit (4 MiB) no longer counts the CR of a CRLF line ending, so a
+  message of exactly the limit is accepted with CRLF as it is with LF. Memory stays
+  bounded to one line, now checked by a test that counts allocations.
 - `show --name <name>` now fails (exit 3, "server `<name>` is not in the lockfile") when
   the name is not locked, like `verify`, `suggest-policy` and `proxy`. Before, a typo
   printed nothing and exited 0, which looked like an empty review.
