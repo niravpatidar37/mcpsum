@@ -34,6 +34,13 @@ All notable changes are recorded here. The format follows
 - A fresh `lock` of a server that speaks both eras now records it as 2026-07-28.
   Existing entries keep their era.
 
+### Fixed
+- I5 egress proxy: a refused client that kept sending a byte at a time held its
+  connection open for as long as it liked, and when the refusal was for too many
+  connections (503) it blocked the proxy from accepting anyone else. Draining a refused
+  request now stops after 1 s in total, and 503 answers are sent off the accept thread
+  (at most 16 at once; beyond that the connection is closed unanswered).
+
 ## [0.2.0] - 2026-10-13
 
 ### Added
