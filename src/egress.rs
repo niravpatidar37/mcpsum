@@ -34,6 +34,10 @@ pub struct Limits {
     pub connect_timeout: Duration,
     /// Open connections at once; more are refused with 503.
     pub max_connections: usize,
+    /// Those 503 answers in progress at once (each drains the refused request
+    /// for up to a second, off the accept thread); beyond this, a connection
+    /// is closed without an answer.
+    pub max_refusals: usize,
 }
 
 impl Default for Limits {
@@ -44,6 +48,7 @@ impl Default for Limits {
             head_timeout: Duration::from_secs(5),
             connect_timeout: Duration::from_secs(10),
             max_connections: 64,
+            max_refusals: 16,
         }
     }
 }
@@ -424,18 +429,30 @@ impl Egress {
         let stop = Arc::new(AtomicBool::new(false));
         let stopped = stop.clone();
         let active = Arc::new(AtomicUsize::new(0));
+        let refusing = Arc::new(AtomicUsize::new(0));
         let thread = thread::Builder::new().name("mcpsum-egress".into()).spawn(move || {
             while !stopped.load(Ordering::Relaxed) {
-                let Ok((mut client, _)) = listener.accept() else {
+                let Ok((client, _)) = listener.accept() else {
                     thread::sleep(Duration::from_millis(20));
                     continue;
                 };
                 if active.fetch_add(1, Ordering::SeqCst) >= self.limits.max_connections {
                     active.fetch_sub(1, Ordering::SeqCst);
-                    let _ = client.set_nonblocking(false);
                     let r = Refusal::Busy;
                     let _ = (self.audit)(&event(None, Decision::Deny, format!("egress denied: {}", r.reason())));
-                    respond(&mut client, &r);
+                    // Answer off this thread: the drain takes up to DRAIN_TIME.
+                    if refusing.fetch_add(1, Ordering::SeqCst) < self.limits.max_refusals {
+                        let guard = ActiveGuard(refusing.clone());
+                        let spawned = thread::Builder::new().spawn(move || {
+                            let _guard = guard;
+                            let mut client = client;
+                            let _ = client.set_nonblocking(false);
+                            respond(&mut client, &r);
+                        });
+                        drop(spawned); // on failure the client is closed unanswered
+                    } else {
+                        refusing.fetch_sub(1, Ordering::SeqCst);
+                    }
                     continue;
                 }
                 let me = self.clone();
@@ -489,10 +506,29 @@ fn respond(client: &mut TcpStream, r: &Refusal) {
     let _ = client.write_all(msg.as_bytes());
     let _ = client.shutdown(Shutdown::Write);
     // Drain a little of what the client is still sending, so closing does not
-    // reset the connection before it has read the answer.
-    let _ = client.set_read_timeout(Some(Duration::from_millis(200)));
-    let _ = io::copy(&mut client.take(64 * 1024), &mut io::sink());
+    // reset the connection before it has read the answer. Bounded in bytes and
+    // in total time, so a client dripping bytes cannot keep its connection (or
+    // its slot) open.
+    let deadline = Instant::now() + DRAIN_TIME;
+    let mut left: usize = 64 * 1024;
+    let mut chunk = [0u8; 4096];
+    while left > 0 {
+        let wait = deadline.saturating_duration_since(Instant::now());
+        if wait.is_zero() || client.set_read_timeout(Some(wait)).is_err() {
+            break;
+        }
+        match client.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => left = left.saturating_sub(n),
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(_) => break,
+        }
+    }
 }
+
+/// How long a refused client's leftover request is drained, in total. Long
+/// enough for a slow client to finish sending what it started.
+const DRAIN_TIME: Duration = Duration::from_secs(1);
 
 fn tunnel(mut client: TcpStream, mut upstream: TcpStream, extra: &[u8]) {
     let _ = client.set_read_timeout(None);
@@ -865,7 +901,7 @@ mod tests {
         assert!(read_status(&mut slow).starts_with("HTTP/1.1 408"));
         assert!(started.elapsed() < Duration::from_secs(5));
         drop(slow);
-        thread::sleep(Duration::from_millis(500)); // refused handlers drain for up to 200 ms
+        thread::sleep(Duration::from_millis(500)); // the refused handler sees EOF and ends
 
         // Two idle connections fill the limit; the third is refused.
         let _a = TcpStream::connect(("127.0.0.1", r.port)).unwrap();
@@ -875,6 +911,62 @@ mod tests {
         assert!(status.starts_with("HTTP/1.1 503"), "{status}");
         let events = wait_events(&r, 3);
         assert!(events.iter().all(|e| e.decision == Decision::Deny), "{events:?}");
+    }
+
+    #[test]
+    fn i5_refused_client_dripping_bytes_cannot_stall_the_proxy() {
+        let limits = Limits {
+            head_timeout: Duration::from_secs(4),
+            max_connections: 1,
+            max_refusals: 2,
+            ..Limits::default()
+        };
+        let r = start(&["127.0.0.1:9"], limits);
+        // Fills the only slot (idle, so it holds it for head_timeout).
+        let _holder = TcpStream::connect(("127.0.0.1", r.port)).unwrap();
+        thread::sleep(Duration::from_millis(150));
+
+        // Refused with 503, then keeps sending a byte every 50 ms (each well
+        // within any per-read timeout) until the proxy closes the connection.
+        let mut dripper = TcpStream::connect(("127.0.0.1", r.port)).unwrap();
+        dripper.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        assert!(read_status(&mut dripper).starts_with("HTTP/1.1 503"));
+        let started = Instant::now();
+        let drip = thread::spawn(move || {
+            let end = Instant::now() + Duration::from_secs(4);
+            while Instant::now() < end && dripper.write_all(b"x").is_ok() {
+                thread::sleep(Duration::from_millis(50));
+            }
+        });
+
+        // Anyone else is still answered at once (503: the slot is held) ...
+        thread::sleep(Duration::from_millis(100));
+        let asked = Instant::now();
+        let mut other = TcpStream::connect(("127.0.0.1", r.port)).unwrap();
+        other.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let status = read_status(&mut other);
+        let waited = asked.elapsed();
+        assert!(status.starts_with("HTTP/1.1 503"), "{status}");
+        assert!(
+            waited < Duration::from_millis(500),
+            "a refused client stalled the proxy for {waited:?}"
+        );
+        // ... up to max_refusals at once; beyond, closed without an answer.
+        let mut third = TcpStream::connect(("127.0.0.1", r.port)).unwrap();
+        third.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut got = [0u8; 1];
+        let res = third.read(&mut got);
+        assert!(matches!(res, Ok(0)) || res.is_err(), "{res:?} {got:?}");
+        assert!(asked.elapsed() < Duration::from_millis(900), "{:?}", asked.elapsed());
+
+        // The drip ends when the proxy closes the connection, not when the
+        // client stops.
+        drip.join().unwrap();
+        let held = started.elapsed();
+        assert!(
+            held < Duration::from_millis(2500),
+            "a dripping client was drained for {held:?}"
+        );
     }
 
     #[test]
