@@ -1,7 +1,7 @@
 # Threat model
 
-This document covers mcpsum v0.1: stdio transport, one proxy process per
-server. It describes what mcpsum defends, against whom, and where it stops.
+This document covers mcpsum v0.2: stdio transport, one proxy process per
+server, optionally sandboxed on Linux. It describes what mcpsum defends, against whom, and where it stops.
 The per-guarantee statements and their tests are in [GUARANTEES.md](GUARANTEES.md).
 
 ## System
@@ -40,7 +40,11 @@ The per-guarantee statements and their tests are in [GUARANTEES.md](GUARANTEES.m
 4. **Client → mcpsum (trusted user, untrusted model).** The client is the
    user's agent, but the *model* choosing calls may already be manipulated. So
    calls are validated, not trusted.
-5. **Server process ↔ OS (not mediated in v0.1).** The server runs as the user.
+5. **Server process ↔ OS (mediated only by the opt-in I5 sandbox, Linux).**
+   Without `policy.sandbox`, and on macOS and Windows, the server runs as the
+   user. With it, Landlock, seccomp and, for a host allowlist, a network
+   namespace behind mcpsum's audited egress proxy confine it
+   ([I5](GUARANTEES.md#i5--the-server-process-is-sandboxed-opt-in-linux)).
 
 ## Attacker models
 
