@@ -121,9 +121,21 @@ pub fn canonical_lenient(p: &Path) -> PathBuf {
 
 /// The directory a program is installed under (`.../bin/prog` -> `...`), unless
 /// that would be `/` or would contain the home directory; then just the
-/// program's own directory, or only the file.
+/// program's own directory, or only the file. Both sides are compared as
+/// given and resolved through symlinks: Landlock grants what a path resolves
+/// to, and `$HOME` or the program path may go through a symlink
+/// (`/home -> /var/home`).
 fn install_prefix(prog: &Path, home: Option<&Path>) -> PathBuf {
-    let too_broad = |p: &Path| p.parent().is_none() || home.is_some_and(|h| h.starts_with(p));
+    let homes: Vec<PathBuf> = home
+        .into_iter()
+        .flat_map(|h| [h.to_path_buf(), canonical_lenient(h)])
+        .collect();
+    let too_broad = |p: &Path| {
+        let real = canonical_lenient(p);
+        p.parent().is_none()
+            || real.parent().is_none()
+            || homes.iter().any(|h| h.starts_with(p) || h.starts_with(&real))
+    };
     let dir = prog.parent().unwrap_or(prog);
     let prefix = dir.parent().unwrap_or(dir);
     if !too_broad(prefix) {
@@ -441,6 +453,73 @@ mod tests {
             install_prefix(Path::new("/home/u/server"), Some(home)),
             PathBuf::from("/home/u/server")
         );
+    }
+
+    /// A directory link (`/home -> /var/home` on ostree distros, a home moved
+    /// to another disk): a symlink on Unix, a junction on Windows (which,
+    /// unlike a symlink, needs no privilege). Removed (the link only) on drop.
+    struct Link(PathBuf);
+
+    impl Link {
+        fn new(target: &Path, link: PathBuf) -> Link {
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(target, &link).unwrap();
+            #[cfg(windows)]
+            {
+                // `mklink` does not take verbatim (`\\?\`) paths.
+                let plain = |p: &Path| p.display().to_string().trim_start_matches(r"\\?\").to_string();
+                let ok = std::process::Command::new("cmd")
+                    .args(["/C", "mklink", "/J", &plain(&link), &plain(target)])
+                    .output()
+                    .unwrap()
+                    .status
+                    .success();
+                assert!(ok, "could not create a junction {}", link.display());
+            }
+            Link(link)
+        }
+    }
+
+    impl Drop for Link {
+        fn drop(&mut self) {
+            #[cfg(unix)]
+            let _ = std::fs::remove_file(&self.0);
+            #[cfg(windows)]
+            let _ = std::fs::remove_dir(&self.0);
+        }
+    }
+
+    #[test]
+    fn i5_program_in_a_symlinked_home_does_not_expose_the_home_directory() {
+        let f = fixture("symhome");
+        let real_home = f.root.join("home");
+        std::fs::create_dir_all(real_home.join("bin")).unwrap();
+        std::fs::write(real_home.join("bin/server"), "").unwrap();
+        let link = Link::new(&real_home, f.root.join("homelink"));
+        // $HOME through the link (program found as `~/bin/server`), and a
+        // canonical $HOME with the program reached through the link.
+        for home in [&link.0, &real_home] {
+            let ctx = GrantInputs {
+                home: Some(home.clone()),
+                ..f.ctx.clone()
+            };
+            let spec = resolve(&policy(&[], &[]), &[link.0.join("bin/server")], &ctx).unwrap();
+            for p in &spec.read {
+                assert!(
+                    !real_home.starts_with(canonical_lenient(p)),
+                    "HOME={}: read grant {} exposes the home directory (incl. ~/.ssh): {:?}",
+                    home.display(),
+                    p.display(),
+                    spec.read
+                );
+            }
+            assert!(spec.read.contains(&real_home.join("bin")), "{:?}", spec.read);
+        }
+        // A prefix that is a link to `/` is as broad as `/` (HOME unset, so
+        // only the root check can stop it).
+        let fs_root = f.root.ancestors().last().unwrap();
+        let to_root = Link::new(fs_root, f.root.join("rootlink"));
+        assert_eq!(install_prefix(&to_root.0.join("bin/prog"), None), to_root.0.join("bin"));
     }
 
     #[cfg(not(target_os = "linux"))]
