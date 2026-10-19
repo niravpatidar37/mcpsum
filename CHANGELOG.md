@@ -6,8 +6,10 @@ All notable changes are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-19
+
 ### Security
-- I2: tool arguments are now checked against the locked `inputSchema` as written as
+- I2 ([GHSA-h84p-xpp4-jghw](https://github.com/niravpatidar37/mcpsum/security/advisories/GHSA-h84p-xpp4-jghw)): tool arguments are now checked against the locked `inputSchema` as written as
   well as its strict form. Before, only the strict rewrite was checked, and it could
   drop locked rules (`not`, `if`/`then`, `contains` with `maxContains`), so arguments
   the lock forbids reached the server. Undeclared properties are now also refused in
