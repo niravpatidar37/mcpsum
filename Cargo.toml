@@ -15,7 +15,7 @@ clap = { version = "4.6.7", features = ["derive"] }
 hex = "0.4.3"
 # default-features = false: no remote/file $ref resolution. An attacker-controlled
 # schema must never make us fetch URLs or read local files (SSRF / LFI).
-jsonschema = { version = "0.59.0", default-features = false }
+jsonschema = { version = "0.60.1", default-features = false }
 # Kill the whole server process tree, not just the direct child: process groups
 # on Unix, Job Objects on Windows (spawned suspended, assigned, then resumed, so a
 # grandchild cannot start outside the job). See src/process.rs and issue #7.
